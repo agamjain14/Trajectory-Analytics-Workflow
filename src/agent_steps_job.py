@@ -53,6 +53,8 @@ AGENT_STEPS_SCHEMA = pa.schema([
     ("rpc_method", pa.string()),
     ("url", pa.string()),
     ("status_code", pa.string()),
+    # ENTRY
+    ("user_message", pa.string()),
     # Context / Prompt / Response (sparse, populated per span_kind)
     ("context", pa.string()),
     ("prompt", pa.string()),
@@ -132,6 +134,7 @@ def _flatten_tags(span_kind: str, tags: dict) -> dict:
 
     if span_kind == "ENTRY":
         flat["method"] = tags.get("http.request.method")
+        flat["user_message"] = tags.get("orchestration.input.user_message")
 
     elif span_kind == "AGENT":
         flat["agent_name"] = tags.get("agent.name")
@@ -235,6 +238,7 @@ def process_spans(input_path: str, output_path: str) -> int:
             "rpc_method": None,
             "url": None,
             "status_code": None,
+            "user_message": None,
             "context": None,
             "prompt": None,
             "response": None,

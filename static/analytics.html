@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agent Trajectory Analytics — Assurance Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0f0f1a;
+            color: #e0e0e0;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        h1 { color: #7dd3fc; margin-bottom: 8px; font-size: 1.6rem; }
+        h2 { color: #a5b4fc; margin-bottom: 12px; font-size: 1.1rem; font-weight: 500; }
+        .header {
+            display: flex; justify-content: space-between; align-items: center;
+            margin-bottom: 20px; padding-bottom: 12px; border-bottom: 1px solid #1e293b;
+        }
+        .header-right { display: flex; gap: 12px; align-items: center; }
+        .refresh-btn {
+            background: #1e40af; border: none; color: #e0e0e0; padding: 8px 16px;
+            border-radius: 6px; cursor: pointer; font-size: 0.85rem;
+        }
+        .refresh-btn:hover { background: #2563eb; }
+        .status-badge {
+            padding: 4px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: 600;
+        }
+        .badge-green { background: #064e3b; color: #6ee7b7; }
+        .badge-yellow { background: #713f12; color: #fde047; }
+        .badge-red { background: #7f1d1d; color: #fca5a5; }
+
+        /* Grid layout */
+        .grid { display: grid; gap: 16px; margin-bottom: 20px; }
+        .grid-4 { grid-template-columns: repeat(4, 1fr); }
+        .grid-2 { grid-template-columns: repeat(2, 1fr); }
+        .grid-3 { grid-template-columns: repeat(3, 1fr); }
+
+        /* Cards */
+        .card {
+            background: #1a1a2e; border: 1px solid #2a2a4a; border-radius: 10px;
+            padding: 16px; position: relative; overflow: hidden;
+        }
+        .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+        .card-title { font-size: 0.8rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; }
+        .card-value { font-size: 1.8rem; font-weight: 700; color: #f1f5f9; }
+        .card-subtitle { font-size: 0.75rem; color: #64748b; margin-top: 4px; }
+
+        /* Charts */
+        .chart-container { position: relative; height: 250px; width: 100%; }
+        .chart-container-lg { height: 300px; }
+
+        /* Alerts */
+        .alert-list { max-height: 300px; overflow-y: auto; }
+        .alert-item {
+            padding: 10px 12px; margin-bottom: 8px; border-radius: 6px;
+            border-left: 3px solid; font-size: 0.85rem;
+        }
+        .alert-gpu { border-color: #ef4444; background: #1c1017; }
+        .alert-network { border-color: #f59e0b; background: #1c1a0f; }
+        .alert-app { border-color: #8b5cf6; background: #1a1028; }
+        .alert-drift { border-color: #06b6d4; background: #0f1a1c; }
+        .alert-quality { border-color: #ec4899; background: #1c101a; }
+        .alert-title { font-weight: 600; margin-bottom: 4px; }
+        .alert-detail { color: #94a3b8; font-size: 0.8rem; }
+
+        /* Summary */
+        .summary-box {
+            background: #1a1a2e; border: 1px solid #2a2a4a; border-radius: 10px;
+            padding: 20px; margin-bottom: 20px; line-height: 1.6;
+        }
+        .summary-box p { color: #cbd5e1; }
+        .summary-label { font-size: 0.75rem; color: #64748b; margin-top: 8px; }
+
+        /* Topology */
+        .topology-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+        .topo-node {
+            background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 12px;
+        }
+        .topo-node-title { font-size: 0.85rem; font-weight: 600; color: #7dd3fc; margin-bottom: 8px; }
+        .topo-gpu {
+            display: inline-block; padding: 3px 8px; margin: 2px; border-radius: 4px;
+            font-size: 0.75rem; font-weight: 500;
+        }
+        .topo-gpu-normal { background: #064e3b; color: #6ee7b7; }
+        .topo-gpu-warn { background: #713f12; color: #fde047; }
+        .topo-gpu-critical { background: #7f1d1d; color: #fca5a5; }
+        .topo-pod { font-size: 0.7rem; color: #94a3b8; }
+
+        /* Trajectory table */
+        .traj-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+        .traj-table th { text-align: left; padding: 8px; color: #94a3b8; border-bottom: 1px solid #334155; }
+        .traj-table td { padding: 8px; border-bottom: 1px solid #1e293b; }
+        .traj-sig { font-family: monospace; color: #7dd3fc; }
+        .traj-bar {
+            height: 6px; border-radius: 3px; background: #3b82f6; display: inline-block;
+        }
+
+        /* Loading */
+        .loading { text-align: center; padding: 40px; color: #64748b; }
+        .loading::after { content: '...'; animation: dots 1.5s steps(3) infinite; }
+        @keyframes dots { 0% { content: '.'; } 33% { content: '..'; } 66% { content: '...'; } }
+
+        @media (max-width: 1200px) { .grid-4 { grid-template-columns: repeat(2, 1fr); } }
+        @media (max-width: 768px) {
+            .grid-4, .grid-3, .grid-2 { grid-template-columns: 1fr; }
+            .topology-grid { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+
+<div class="header">
+    <div>
+        <h1>Agent Trajectory Analytics</h1>
+        <span style="color: #64748b; font-size: 0.85rem;">Infrastructure-Aware Quality Observability</span>
+    </div>
+    <div class="header-right">
+        <span id="last-update" style="color: #64748b; font-size: 0.8rem;"></span>
+        <span id="status-badge" class="status-badge badge-green">HEALTHY</span>
+        <button class="refresh-btn" onclick="loadAll()">↻ Refresh</button>
+    </div>
+</div>
+
+<!-- KPI Cards -->
+<div class="grid grid-4" id="kpi-cards">
+    <div class="card">
+        <div class="card-title">Total Traces</div>
+        <div class="card-value" id="kpi-traces">-</div>
+        <div class="card-subtitle" id="kpi-templates">- templates</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Avg Quality</div>
+        <div class="card-value" id="kpi-quality">-</div>
+        <div class="card-subtitle" id="kpi-quality-sub">out of 5.0</div>
+    </div>
+    <div class="card">
+        <div class="card-title">GPU Contention</div>
+        <div class="card-value" id="kpi-contention">-</div>
+        <div class="card-subtitle" id="kpi-contention-sub">avg index</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Alerts</div>
+        <div class="card-value" id="kpi-alerts">-</div>
+        <div class="card-subtitle" id="kpi-alerts-sub">correlation alerts</div>
+    </div>
+</div>
+
+<!-- LLM Summary -->
+<div class="summary-box" id="summary-box">
+    <h2>🧠 AI Insights</h2>
+    <p id="summary-text" class="loading">Generating summary</p>
+    <div class="summary-label" id="summary-meta"></div>
+</div>
+
+<!-- Charts Row 1: Quality + GPU -->
+<div class="grid grid-2">
+    <div class="card">
+        <h2>Quality Scores by Trace</h2>
+        <div class="chart-container">
+            <canvas id="quality-chart"></canvas>
+        </div>
+    </div>
+    <div class="card">
+        <h2>GPU Contention Over Time</h2>
+        <div class="chart-container">
+            <canvas id="gpu-chart"></canvas>
+        </div>
+    </div>
+</div>
+
+<!-- Charts Row 2: Trajectory Distribution + Correlation -->
+<div class="grid grid-2" style="margin-top: 16px;">
+    <div class="card">
+        <h2>Trajectory Template Distribution</h2>
+        <div class="chart-container">
+            <canvas id="traj-chart"></canvas>
+        </div>
+    </div>
+    <div class="card">
+        <h2>Quality vs GPU Contention (per trace)</h2>
+        <div class="chart-container">
+            <canvas id="scatter-chart"></canvas>
+        </div>
+    </div>
+</div>
+
+<!-- Alerts + Topology -->
+<div class="grid grid-2" style="margin-top: 16px;">
+    <div class="card">
+        <h2>Correlation Alerts</h2>
+        <div class="alert-list" id="alert-list">
+            <div class="loading">Loading alerts</div>
+        </div>
+    </div>
+    <div class="card">
+        <h2>Infrastructure Topology</h2>
+        <div class="topology-grid" id="topology-view">
+            <div class="loading">Loading topology</div>
+        </div>
+    </div>
+</div>
+
+<!-- Trajectory Table -->
+<div class="card" style="margin-top: 16px;">
+    <h2>Trajectory Templates</h2>
+    <table class="traj-table" id="traj-table">
+        <thead>
+            <tr>
+                <th>Signature</th>
+                <th>Count</th>
+                <th>Share</th>
+                <th>Steps</th>
+                <th>LLM Calls</th>
+                <th>Tools</th>
+                <th>Distribution</th>
+            </tr>
+        </thead>
+        <tbody id="traj-table-body">
+            <tr><td colspan="7" class="loading">Loading</td></tr>
+        </tbody>
+    </table>
+</div>
+
+<!-- Microstructure -->
+<div class="card" style="margin-top: 16px;">
+    <h2>Step Microstructure (per trace)</h2>
+    <div class="chart-container chart-container-lg">
+        <canvas id="micro-chart"></canvas>
+    </div>
+</div>
+
+<script>
+const API_BASE = window.location.origin;
+let charts = {};
+
+async function fetchJSON(path) {
+    const res = await fetch(`${API_BASE}${path}`);
+    if (!res.ok) return null;
+    return res.json();
+}
+
+async function loadKPIs() {
+    const data = await fetchJSON('/analytics/correlation/traces');
+    if (!data) return;
+    const traces = data.traces;
+    document.getElementById('kpi-traces').textContent = traces.length;
+
+    const sigs = new Set(traces.map(t => t.trajectory_signature));
+    document.getElementById('kpi-templates').textContent = `${sigs.size} templates`;
+
+    const avgQ = traces.reduce((s, t) => s + (t.quality_overall || 0), 0) / traces.length;
+    document.getElementById('kpi-quality').textContent = avgQ.toFixed(2);
+
+    const avgC = traces.reduce((s, t) => s + (t.gpu_contention_avg || 0), 0) / traces.length;
+    document.getElementById('kpi-contention').textContent = avgC.toFixed(3);
+
+    // Set status badge
+    const badge = document.getElementById('status-badge');
+    if (avgC > 0.7) { badge.textContent = 'DEGRADED'; badge.className = 'status-badge badge-red'; }
+    else if (avgC > 0.4) { badge.textContent = 'WARNING'; badge.className = 'status-badge badge-yellow'; }
+    else { badge.textContent = 'HEALTHY'; badge.className = 'status-badge badge-green'; }
+}
+
+async function loadAlerts() {
+    const data = await fetchJSON('/analytics/correlation/alerts');
+    const el = document.getElementById('alert-list');
+    if (!data || data.total_alerts === 0) {
+        el.innerHTML = '<div style="color:#64748b; padding:20px; text-align:center;">No alerts — system nominal</div>';
+        document.getElementById('kpi-alerts').textContent = '0';
+        return;
+    }
+    document.getElementById('kpi-alerts').textContent = data.total_alerts;
+    document.getElementById('kpi-alerts-sub').textContent = `${Object.keys(data.by_flag).length} types`;
+
+    const flagClass = {
+        'gpu_induced_degradation': 'alert-gpu',
+        'network_induced_degradation': 'alert-network',
+        'app_layer_degradation': 'alert-app',
+        'trajectory_drift_no_quality_impact': 'alert-drift',
+        'quality_drop_stable_trajectory': 'alert-quality',
+    };
+
+    el.innerHTML = data.alerts.map(a => `
+        <div class="alert-item ${flagClass[a.correlation_flag] || 'alert-drift'}">
+            <div class="alert-title">${a.correlation_flag.replace(/_/g, ' ')}</div>
+            <div class="alert-detail">[${a.window_size}] ${a.correlation_details || ''}</div>
+        </div>
+    `).join('');
+}
+
+async function loadQualityChart() {
+    const data = await fetchJSON('/analytics/quality');
+    if (!data) return;
+    const scores = data.scores;
+    const labels = scores.map((s, i) => `Trace ${i + 1}`);
+
+    if (charts.quality) charts.quality.destroy();
+    charts.quality = new Chart(document.getElementById('quality-chart'), {
+        type: 'bar',
+        data: {
+            labels,
+            datasets: [
+                { label: 'Completeness', data: scores.map(s => s.completeness), backgroundColor: '#3b82f6' },
+                { label: 'Coherence', data: scores.map(s => s.coherence), backgroundColor: '#8b5cf6' },
+                { label: 'Hallucination', data: scores.map(s => s.hallucination), backgroundColor: '#ef4444' },
+                { label: 'Groundedness', data: scores.map(s => s.groundedness), backgroundColor: '#10b981' },
+                { label: 'Relevance', data: scores.map(s => s.relevance), backgroundColor: '#f59e0b' },
+            ],
+        },
+        options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: { legend: { labels: { color: '#94a3b8', font: { size: 10 } } } },
+            scales: {
+                x: { ticks: { color: '#64748b' }, grid: { color: '#1e293b' } },
+                y: { min: 0, max: 5, ticks: { color: '#64748b' }, grid: { color: '#1e293b' } },
+            },
+        },
+    });
+}
+
+async function loadGPUChart() {
+    const data = await fetchJSON('/analytics/gpu?downsample=4');
+    if (!data) return;
+    const metrics = data.metrics;
+
+    // Group by node+gpu
+    const series = {};
+    metrics.forEach(m => {
+        const key = `${m.node_id}:${m.gpu_id}`;
+        if (!series[key]) series[key] = [];
+        series[key].push({ x: m.timestamp_ms, y: m.contention_index });
+    });
+
+    const colors = ['#3b82f6', '#ef4444', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899'];
+    const datasets = Object.entries(series).map(([key, points], i) => ({
+        label: key,
+        data: points,
+        borderColor: colors[i % colors.length],
+        borderWidth: 1.5,
+        pointRadius: 0,
+        fill: false,
+    }));
+
+    if (charts.gpu) charts.gpu.destroy();
+    charts.gpu = new Chart(document.getElementById('gpu-chart'), {
+        type: 'line',
+        data: { datasets },
+        options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: { legend: { labels: { color: '#94a3b8', font: { size: 10 } } } },
+            scales: {
+                x: { type: 'linear', ticks: { display: false }, grid: { color: '#1e293b' } },
+                y: { min: 0, max: 1, title: { display: true, text: 'Contention Index', color: '#64748b' },
+                     ticks: { color: '#64748b' }, grid: { color: '#1e293b' } },
+            },
+        },
+    });
+}
+
+async function loadTrajectoryChart() {
+    const data = await fetchJSON('/analytics/trajectories');
+    if (!data) return;
+    const dist = data.distribution;
+
+    if (charts.traj) charts.traj.destroy();
+    charts.traj = new Chart(document.getElementById('traj-chart'), {
+        type: 'doughnut',
+        data: {
+            labels: dist.map(d => d.signature),
+            datasets: [{
+                data: dist.map(d => d.count),
+                backgroundColor: ['#3b82f6', '#8b5cf6', '#10b981', '#f59e0b', '#ef4444', '#ec4899'],
+            }],
+        },
+        options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: {
+                legend: { position: 'right', labels: { color: '#94a3b8', font: { size: 11 } } },
+            },
+        },
+    });
+
+    // Table
+    const tbody = document.getElementById('traj-table-body');
+    tbody.innerHTML = dist.map(d => `
+        <tr>
+            <td class="traj-sig">${d.signature}</td>
+            <td>${d.count}</td>
+            <td>${(d.share * 100).toFixed(1)}%</td>
+            <td>${d.step_count}</td>
+            <td>${d.llm_call_count}</td>
+            <td>${d.tool_call_count}</td>
+            <td><span class="traj-bar" style="width: ${d.share * 200}px;"></span></td>
+        </tr>
+    `).join('');
+}
+
+async function loadScatterChart() {
+    const data = await fetchJSON('/analytics/correlation/traces');
+    if (!data) return;
+    const traces = data.traces;
+
+    const points = traces.map(t => ({
+        x: t.gpu_contention_avg || 0,
+        y: t.quality_overall || 0,
+    }));
+
+    if (charts.scatter) charts.scatter.destroy();
+    charts.scatter = new Chart(document.getElementById('scatter-chart'), {
+        type: 'scatter',
+        data: {
+            datasets: [{
+                label: 'Traces',
+                data: points,
+                backgroundColor: points.map(p => p.x > 0.7 ? '#ef4444' : p.x > 0.4 ? '#f59e0b' : '#10b981'),
+                pointRadius: 8,
+            }],
+        },
+        options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: { legend: { display: false } },
+            scales: {
+                x: { title: { display: true, text: 'GPU Contention (avg)', color: '#64748b' },
+                     min: 0, max: 1, ticks: { color: '#64748b' }, grid: { color: '#1e293b' } },
+                y: { title: { display: true, text: 'Quality Score', color: '#64748b' },
+                     min: 0, max: 5, ticks: { color: '#64748b' }, grid: { color: '#1e293b' } },
+            },
+        },
+    });
+}
+
+async function loadMicrostructure() {
+    const data = await fetchJSON('/analytics/microstructure');
+    if (!data) return;
+    const items = data.microstructure;
+    const labels = items.map((_, i) => `Trace ${i + 1}`);
+
+    if (charts.micro) charts.micro.destroy();
+    charts.micro = new Chart(document.getElementById('micro-chart'), {
+        type: 'bar',
+        data: {
+            labels,
+            datasets: [
+                { label: 'LLM Calls', data: items.map(i => i.llm_call_count), backgroundColor: '#3b82f6' },
+                { label: 'Tool Calls', data: items.map(i => i.tool_call_count), backgroundColor: '#10b981' },
+                { label: 'Retrieves', data: items.map(i => i.retrieve_count), backgroundColor: '#f59e0b' },
+                { label: 'Agents', data: items.map(i => i.agent_count), backgroundColor: '#8b5cf6' },
+                { label: 'Retries', data: items.map(i => i.retry_count), backgroundColor: '#ef4444' },
+            ],
+        },
+        options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: { legend: { labels: { color: '#94a3b8' } } },
+            scales: {
+                x: { stacked: true, ticks: { color: '#64748b' }, grid: { color: '#1e293b' } },
+                y: { stacked: true, ticks: { color: '#64748b' }, grid: { color: '#1e293b' } },
+            },
+        },
+    });
+}
+
+async function loadTopology() {
+    const data = await fetchJSON('/analytics/topology');
+    const routingData = await fetchJSON('/analytics/routing');
+    const gpuData = await fetchJSON('/analytics/gpu?downsample=10');
+    if (!data) return;
+
+    const el = document.getElementById('topology-view');
+    const nodes = (data.by_type?.node || []);
+    const pods = (data.by_type?.pod || []);
+    const gpus = (data.by_type?.gpu || []);
+
+    // Get avg contention per node:gpu
+    const gpuContention = {};
+    if (gpuData) {
+        gpuData.metrics.forEach(m => {
+            const key = `${m.node_id}:${m.gpu_id}`;
+            if (!gpuContention[key]) gpuContention[key] = [];
+            gpuContention[key].push(m.contention_index);
+        });
+    }
+
+    el.innerHTML = nodes.map(node => {
+        const nodeId = node.entity_id;
+        const nodeGpus = gpus.filter(g => g.parent_id === nodeId);
+        const nodePods = pods.filter(p => p.parent_id === nodeId);
+
+        const gpuHtml = nodeGpus.map(g => {
+            const key = g.entity_id;
+            const vals = gpuContention[key] || [];
+            const avg = vals.length > 0 ? vals.reduce((a, b) => a + b, 0) / vals.length : 0;
+            const cls = avg > 0.7 ? 'topo-gpu-critical' : avg > 0.4 ? 'topo-gpu-warn' : 'topo-gpu-normal';
+            return `<span class="topo-gpu ${cls}">${g.entity_id.split(':')[1]} (${avg.toFixed(2)})</span>`;
+        }).join('');
+
+        const podHtml = nodePods.map(p => {
+            const count = routingData?.by_pod?.[p.entity_id] || 0;
+            return `<span class="topo-pod">${p.entity_id}(${count}req)</span>`;
+        }).join(' ');
+
+        const props = node.properties || {};
+        return `
+            <div class="topo-node">
+                <div class="topo-node-title">${nodeId}</div>
+                <div style="font-size:0.7rem; color:#64748b; margin-bottom:6px;">
+                    ${props.switch_port || ''} | NIC: ${props.nic || ''}
+                </div>
+                <div style="margin-bottom:6px;">${gpuHtml}</div>
+                <div>${podHtml}</div>
+            </div>
+        `;
+    }).join('');
+}
+
+async function loadSummary() {
+    const el = document.getElementById('summary-text');
+    const meta = document.getElementById('summary-meta');
+    el.className = 'loading';
+    el.textContent = 'Generating AI summary';
+
+    const data = await fetchJSON('/analytics/summary');
+    if (!data) {
+        el.className = '';
+        el.textContent = 'Failed to generate summary.';
+        return;
+    }
+    el.className = '';
+    el.textContent = data.summary;
+    meta.textContent = `Generated by ${data.model} at ${new Date(data.generated_at_ms).toLocaleTimeString()}`;
+}
+
+async function loadAll() {
+    document.getElementById('last-update').textContent = `Updated: ${new Date().toLocaleTimeString()}`;
+    await Promise.all([
+        loadKPIs(),
+        loadAlerts(),
+        loadQualityChart(),
+        loadGPUChart(),
+        loadTrajectoryChart(),
+        loadScatterChart(),
+        loadMicrostructure(),
+        loadTopology(),
+    ]);
+    // Load summary last (takes longer due to LLM call)
+    loadSummary();
+}
+
+// Initial load
+loadAll();
+</script>
+</body>
+</html>
