@@ -1,0 +1,60 @@
+# OpenTelemetry Collector Configuration
+# Receives traces, metrics, and logs from the Travel Agent application
+# Routes to Jaeger (traces) and Prometheus (metrics)
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+  
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+
+  attributes:
+    actions:
+      - key: environment
+        value: development
+        action: upsert
+
+exporters:
+  # Jaeger for traces
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+  # Prometheus for metrics
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    namespace: travel_agent
+
+  # Console/debug output
+  debug:
+    verbosity: detailed
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch, attributes]
+      exporters: [otlp/jaeger, debug]
+    
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus, debug]
+    
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug]

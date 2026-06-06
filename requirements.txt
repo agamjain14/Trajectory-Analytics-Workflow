@@ -1,0 +1,33 @@
+# LLM & AI
+openai>=1.0.0
+ollama>=0.3.0
+chromadb>=0.4.0
+sentence-transformers>=2.2.0
+
+# OpenTelemetry - Core
+opentelemetry-api>=1.20.0
+opentelemetry-sdk>=1.20.0
+
+# OpenTelemetry - Exporters
+opentelemetry-exporter-otlp>=1.20.0
+opentelemetry-exporter-otlp-proto-grpc>=1.20.0
+opentelemetry-exporter-prometheus>=0.41b0
+
+# OpenTelemetry - Instrumentation
+opentelemetry-instrumentation-requests>=0.41b0
+opentelemetry-instrumentation-logging>=0.41b0
+
+# HTTP & Tools
+requests>=2.31.0
+httpx>=0.25.0
+fastapi>=0.104.0
+uvicorn>=0.24.0
+
+# Utilities
+tenacity>=8.2.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+structlog>=23.0.0
+
+# Metrics
+prometheus-client>=0.19.0
