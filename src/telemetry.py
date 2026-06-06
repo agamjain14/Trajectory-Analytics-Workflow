@@ -5,10 +5,11 @@ Sets up OpenTelemetry traces, metrics, and structured logging for the entire app
 
 import os
 import logging
+from contextvars import ContextVar
 from dotenv import load_dotenv
 
 from opentelemetry import trace, metrics
-from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace import TracerProvider, SpanProcessor
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import (
@@ -27,6 +28,40 @@ from src.pulsar_exporter import PulsarSpanExporter
 import structlog
 
 load_dotenv()
+
+# --- Session context propagation ---
+# This ContextVar holds the current session_id for the request.
+# The custom SpanProcessor reads it and stamps every span with session.id.
+_current_session_id: ContextVar[str] = ContextVar("current_session_id", default="")
+
+
+def set_current_session_id(session_id: str) -> None:
+    """Set the session_id for the current async/thread context."""
+    _current_session_id.set(session_id)
+
+
+def get_current_session_id() -> str:
+    """Get the session_id for the current context."""
+    return _current_session_id.get()
+
+
+class SessionIdSpanProcessor(SpanProcessor):
+    """SpanProcessor that automatically sets session.id on every span from context."""
+
+    def on_start(self, span, parent_context=None):
+        session_id = _current_session_id.get()
+        if session_id:
+            span.set_attribute("session.id", session_id)
+
+    def on_end(self, span):
+        pass
+
+    def shutdown(self):
+        pass
+
+    def force_flush(self, timeout_millis=30000):
+        return True
+
 
 _resource = Resource.create(
     {
@@ -55,6 +90,9 @@ def init_tracer() -> trace.Tracer:
         service_name=os.getenv("OTEL_SERVICE_NAME", "trajectory-analytics-ai-app"),
     )
     _provider.add_span_processor(BatchSpanProcessor(pulsar_exporter))
+
+    # Session ID propagation processor (must be added first so it runs on_start before export)
+    _provider.add_span_processor(SessionIdSpanProcessor())
 
     trace.set_tracer_provider(_provider)
     return trace.get_tracer("trajectory.ai.app")

@@ -42,6 +42,14 @@ def _get_conn() -> sqlite3.Connection:
             FOREIGN KEY (session_id) REFERENCES sessions(session_id)
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS session_context (
+            session_id TEXT PRIMARY KEY,
+            context TEXT NOT NULL DEFAULT '{}',
+            state TEXT NOT NULL DEFAULT 'gathering',
+            FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+        )
+    """)
     conn.commit()
     return conn
 
@@ -136,3 +144,26 @@ def get_session(session_id: str) -> dict | None:
     row = conn.execute("SELECT * FROM sessions WHERE session_id = ?", (session_id,)).fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+def get_session_context(session_id: str) -> dict:
+    """Get the trip-planning context for a session (gathered parameters)."""
+    conn = _get_conn()
+    row = conn.execute("SELECT context, state FROM session_context WHERE session_id = ?", (session_id,)).fetchone()
+    conn.close()
+    if not row:
+        return {"state": "gathering", "params": {}}
+    return {"state": row["state"], "params": json.loads(row["context"])}
+
+
+def set_session_context(session_id: str, params: dict, state: str = "gathering") -> None:
+    """Update the trip-planning context for a session."""
+    conn = _get_conn()
+    conn.execute(
+        """INSERT INTO session_context (session_id, context, state) VALUES (?, ?, ?)
+           ON CONFLICT(session_id) DO UPDATE SET context = excluded.context, state = excluded.state""",
+        (session_id, json.dumps(params), state),
+    )
+    conn.commit()
+    conn.close()
+

@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Travel Agent AI</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #e0e0e0;
+            height: 100vh;
+            display: flex;
+        }
+
+        /* Sidebar */
+        .sidebar {
+            width: 260px;
+            background: #16213e;
+            border-right: 1px solid #2a2a4a;
+            display: flex;
+            flex-direction: column;
+        }
+        .sidebar-header {
+            padding: 16px;
+            border-bottom: 1px solid #2a2a4a;
+        }
+        .sidebar-header h2 {
+            font-size: 13px;
+            color: #8b8ba7;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 12px;
+        }
+        .new-chat-btn {
+            width: 100%;
+            padding: 10px;
+            background: #0f3460;
+            border: 1px solid #1a5276;
+            border-radius: 8px;
+            color: #fff;
+            font-size: 13px;
+            cursor: pointer;
+        }
+        .new-chat-btn:hover { background: #1a5276; }
+        .session-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 8px;
+        }
+        .session-item {
+            padding: 10px 12px;
+            border-radius: 8px;
+            cursor: pointer;
+            margin-bottom: 2px;
+        }
+        .session-item:hover { background: #1a2744; }
+        .session-item.active { background: #0f3460; }
+        .session-item .title {
+            font-size: 13px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .session-item .meta {
+            font-size: 11px;
+            color: #6b6b8a;
+            margin-top: 3px;
+        }
+        .badge {
+            display: inline-block;
+            font-size: 10px;
+            padding: 1px 5px;
+            border-radius: 3px;
+            margin-left: 4px;
+        }
+        .badge-active { background: #1b4332; color: #52b788; }
+        .badge-ended { background: #3d2020; color: #e07a7a; }
+
+        /* Main */
+        .main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+        .chat-header {
+            padding: 14px 20px;
+            border-bottom: 1px solid #2a2a4a;
+            background: #16213e;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .chat-header h1 { font-size: 16px; }
+        .chat-header .info { font-size: 11px; color: #6b6b8a; }
+        .end-btn {
+            padding: 5px 12px;
+            background: #4a1c1c;
+            border: 1px solid #6b2b2b;
+            border-radius: 6px;
+            color: #e07a7a;
+            font-size: 11px;
+            cursor: pointer;
+            display: none;
+        }
+        .end-btn:hover { background: #6b2b2b; }
+
+        /* Messages */
+        .messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+        }
+        .msg {
+            margin-bottom: 16px;
+            max-width: 80%;
+        }
+        .msg.user { margin-left: auto; }
+        .msg .bubble {
+            padding: 12px 16px;
+            border-radius: 14px;
+            font-size: 13px;
+            line-height: 1.6;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+        .msg.user .bubble {
+            background: #0f3460;
+            border-bottom-right-radius: 4px;
+        }
+        .msg.assistant .bubble {
+            background: #1e2a3a;
+            border-bottom-left-radius: 4px;
+        }
+        .msg .who {
+            font-size: 10px;
+            color: #6b6b8a;
+            margin-bottom: 3px;
+            padding-left: 4px;
+        }
+        .msg.user .who { text-align: right; padding-right: 4px; }
+
+        /* Input */
+        .input-area {
+            padding: 14px 20px;
+            border-top: 1px solid #2a2a4a;
+            background: #16213e;
+        }
+        .input-row {
+            display: flex;
+            gap: 10px;
+        }
+        .input-row input {
+            flex: 1;
+            padding: 11px 14px;
+            background: #1a1a2e;
+            border: 1px solid #2a2a4a;
+            border-radius: 10px;
+            color: #e0e0e0;
+            font-size: 14px;
+            outline: none;
+        }
+        .input-row input:focus { border-color: #1a5276; }
+        .send-btn {
+            padding: 11px 18px;
+            background: #0f3460;
+            border: none;
+            border-radius: 10px;
+            color: #fff;
+            font-size: 13px;
+            cursor: pointer;
+        }
+        .send-btn:hover { background: #1a5276; }
+        .send-btn:disabled { background: #2a2a4a; cursor: not-allowed; }
+
+        /* Typing */
+        .typing { display: none; margin-bottom: 16px; }
+        .typing.show { display: block; }
+        .typing .bubble {
+            background: #1e2a3a;
+            padding: 12px 16px;
+            border-radius: 14px;
+            display: inline-block;
+        }
+        .dot {
+            display: inline-block;
+            width: 7px; height: 7px;
+            background: #6b6b8a;
+            border-radius: 50%;
+            margin-right: 3px;
+            animation: pulse 1.4s infinite;
+        }
+        .dot:nth-child(2) { animation-delay: 0.2s; }
+        .dot:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes pulse {
+            0%, 60%, 100% { opacity: 0.3; }
+            30% { opacity: 1; }
+        }
+
+        /* Welcome */
+        .welcome {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: #6b6b8a;
+            text-align: center;
+            padding: 40px;
+        }
+        .welcome h2 { font-size: 22px; color: #8b8ba7; margin-bottom: 10px; }
+        .welcome p { font-size: 14px; max-width: 400px; line-height: 1.6; }
+
+        ::-webkit-scrollbar { width: 5px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #2a2a4a; border-radius: 3px; }
+    </style>
+</head>
+<body>
+    <div class="sidebar">
+        <div class="sidebar-header">
+            <h2>Travel Agent AI</h2>
+            <button class="new-chat-btn" onclick="newChat()">+ New Chat</button>
+        </div>
+        <div class="session-list" id="sessionList"></div>
+    </div>
+
+    <div class="main">
+        <div class="chat-header">
+            <div>
+                <h1 id="hdrTitle">Travel Agent AI</h1>
+                <div class="info" id="hdrInfo">Tell me about your trip and I'll handle the rest</div>
+            </div>
+            <button class="end-btn" id="endBtn" onclick="endChat()">End Session</button>
+        </div>
+
+        <div class="messages" id="messages">
+            <div class="welcome" id="welcome">
+                <h2>Where to next?</h2>
+                <p>Tell me about your travel plans and I'll ask the right questions to help you plan the perfect trip.</p>
+            </div>
+        </div>
+
+        <div class="typing" id="typing">
+            <div class="bubble"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+        </div>
+
+        <div class="input-area">
+            <div class="input-row">
+                <input type="text" id="input" placeholder="Plan my vacation to Italy..."
+                       onkeydown="if(event.key==='Enter')send()">
+                <button class="send-btn" id="sendBtn" onclick="send()">Send</button>
+            </div>
+        </div>
+    </div>
+
+<script>
+let sessionId = null;
+let sessionEnded = false;
+
+async function api(url, method='GET', body=null) {
+    const opts = { method, headers: {'Content-Type':'application/json'} };
+    if (body) opts.body = JSON.stringify(body);
+    const r = await fetch(url, opts);
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
+}
+
+async function loadSessions() {
+    const d = await api('/api/sessions');
+    const el = document.getElementById('sessionList');
+    el.innerHTML = '';
+    d.sessions.forEach(s => {
+        const div = document.createElement('div');
+        div.className = 'session-item' + (s.session_id === sessionId ? ' active' : '');
+        div.onclick = () => openSession(s.session_id);
+        const bc = s.status === 'active' ? 'badge-active' : 'badge-ended';
+        div.innerHTML = `<div class="title">${esc(s.title)}</div>
+            <div class="meta"><span class="badge ${bc}">${s.status}</span></div>`;
+        el.appendChild(div);
+    });
+}
+
+function newChat() {
+    sessionId = null;
+    sessionEnded = false;
+    document.getElementById('messages').innerHTML = `
+        <div class="welcome" id="welcome">
+            <h2>Where to next?</h2>
+            <p>Tell me about your travel plans and I'll ask the right questions.</p>
+        </div>`;
+    document.getElementById('hdrTitle').textContent = 'New Chat';
+    document.getElementById('hdrInfo').textContent = 'Session will be created on first message';
+    document.getElementById('endBtn').style.display = 'none';
+    loadSessions();
+}
+
+async function openSession(sid) {
+    sessionId = sid;
+    let session;
+    try {
+        session = await api(`/api/sessions/${sid}`);
+    } catch (e) {
+        // Session no longer exists (DB reset) — clear and refresh
+        sessionId = null;
+        newChat();
+        return;
+    }
+    sessionEnded = session.status === 'ended';
+    document.getElementById('hdrTitle').textContent = session.title || 'Session';
+    document.getElementById('hdrInfo').textContent = `${session.session_id.slice(0,8)}... | ${session.total_turns} turns` + (sessionEnded ? ' (ended)' : '');
+    document.getElementById('endBtn').style.display = sessionEnded ? 'none' : 'inline-block';
+    // Load history
+    const hist = await api(`/api/sessions/${sid}/history`);
+    const el = document.getElementById('messages');
+    el.innerHTML = '';
+    hist.messages.forEach(m => addMsg(m.role, m.content));
+    el.scrollTop = el.scrollHeight;
+    loadSessions();
+}
+
+async function send() {
+    const input = document.getElementById('input');
+    const msg = input.value.trim();
+    if (!msg) return;
+    input.value = '';
+
+    // Hide welcome
+    const w = document.getElementById('welcome');
+    if (w) w.remove();
+
+    addMsg('user', msg);
+    setTyping(true);
+    disable(true);
+
+    try {
+        // Resume ended session on first new message
+        if (sessionId && sessionEnded) {
+            await api(`/api/sessions/${sessionId}/resume`, 'POST');
+            sessionEnded = false;
+            document.getElementById('endBtn').style.display = 'inline-block';
+        }
+
+        const res = await api('/api/chat', 'POST', {
+            session_id: sessionId,
+            message: msg,
+        });
+
+        // If session was auto-created or recreated, capture the new ID
+        if (res.session_id && res.session_id !== sessionId) {
+            sessionId = res.session_id;
+            document.getElementById('hdrTitle').textContent = msg.slice(0, 40);
+            document.getElementById('hdrInfo').textContent = `${sessionId.slice(0,8)}... | Turn ${res.turn}`;
+            document.getElementById('endBtn').style.display = 'inline-block';
+        } else {
+            document.getElementById('hdrInfo').textContent = `${sessionId.slice(0,8)}... | Turn ${res.turn}`;
+        }
+
+        setTyping(false);
+        addMsg('assistant', res.content);
+        loadSessions();
+    } catch(e) {
+        setTyping(false);
+        addMsg('assistant', 'Error: ' + e.message);
+    }
+    disable(false);
+    input.focus();
+}
+
+async function endChat() {
+    if (!sessionId) return;
+    try {
+        await api(`/api/sessions/${sessionId}/end`, 'POST');
+    } catch (e) { /* session may not exist */ }
+    sessionEnded = true;
+    document.getElementById('endBtn').style.display = 'none';
+    document.getElementById('hdrInfo').textContent += ' (ended)';
+    loadSessions();
+}
+
+function addMsg(role, content) {
+    const el = document.getElementById('messages');
+    const div = document.createElement('div');
+    div.className = 'msg ' + role;
+    const who = role === 'user' ? 'You' : 'Travel Agent';
+    const rendered = esc(content)
+        .replace(/## (.+)/g, '<strong style="font-size:15px">$1</strong>')
+        .replace(/### (.+)/g, '<strong>$1</strong>')
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        .replace(/\n/g, '<br>');
+    div.innerHTML = `<div class="who">${who}</div><div class="bubble">${rendered}</div>`;
+    el.appendChild(div);
+    el.scrollTop = el.scrollHeight;
+}
+
+function setTyping(on) {
+    document.getElementById('typing').className = on ? 'typing show' : 'typing';
+}
+function disable(on) {
+    document.getElementById('input').disabled = on;
+    document.getElementById('sendBtn').disabled = on;
+}
+function esc(t) {
+    const d = document.createElement('div');
+    d.textContent = t;
+    return d.innerHTML;
+}
+
+// Init
+loadSessions();
+</script>
+</body>
+</html>

@@ -28,9 +28,11 @@ PULSAR_TOPIC = os.getenv("PULSAR_TOPIC", "persistent://public/default/otlp-trace
 PULSAR_SUBSCRIPTION = os.getenv("PULSAR_SUBSCRIPTION", "trace-delta-writer")
 DELTA_TABLE_PATH = os.getenv("DELTA_TABLE_PATH", "./data/trace_delta_table")
 
-# Batching: flush at 250 spans OR 5 minutes, whichever comes first
-BATCH_MAX_SIZE = int(os.getenv("CONSUMER_BATCH_MAX_SIZE", "250"))
-BATCH_MAX_SECONDS = int(os.getenv("CONSUMER_BATCH_MAX_SECONDS", "300"))  # 5 minutes
+# Batching config
+BATCH_MAX_SIZE = int(os.getenv("CONSUMER_BATCH_SIZE", "200"))
+# Time-based batching: set to 0 or empty to disable
+BATCH_MAX_SECONDS = int(os.getenv("CONSUMER_BATCH_TIMEOUT_SECONDS", "300"))  # 0 = disabled
+ENABLE_TIME_BATCHING = BATCH_MAX_SECONDS > 0
 
 # --- Arrow Schema ---
 # Delta table columns (flat, readable names):
@@ -212,11 +214,15 @@ def write_batch_to_delta(rows: list[dict[str, Any]]) -> None:
 
 
 def run_consumer() -> None:
-    """Main consumer loop: read from Pulsar, batch by size/time, write to Delta."""
+    """Main consumer loop: read from Pulsar, batch by size (and optionally time), write to Delta."""
     logger.info(f"Connecting to Pulsar at {PULSAR_URL}")
     logger.info(f"Topic: {PULSAR_TOPIC}")
     logger.info(f"Delta table: {DELTA_TABLE_PATH}")
-    logger.info(f"Batch policy: {BATCH_MAX_SIZE} spans OR {BATCH_MAX_SECONDS}s")
+    logger.info(f"Batch size: {BATCH_MAX_SIZE} spans")
+    if ENABLE_TIME_BATCHING:
+        logger.info(f"Time-based flush: every {BATCH_MAX_SECONDS}s")
+    else:
+        logger.info("Time-based flush: DISABLED (size-only batching)")
 
     client = pulsar.Client(PULSAR_URL)
     consumer = client.subscribe(
@@ -245,12 +251,13 @@ def run_consumer() -> None:
                 msg = consumer.receive(timeout_millis=2000)
             except Exception:
                 # Timeout — check if time-based flush is needed
-                elapsed = time_mod.monotonic() - batch_start_time
-                if batch and elapsed >= BATCH_MAX_SECONDS:
-                    logger.info(f"Time-based flush: {len(batch)} spans after {elapsed:.0f}s")
-                    write_batch_to_delta(batch)
-                    batch = []
-                    batch_start_time = time_mod.monotonic()
+                if ENABLE_TIME_BATCHING:
+                    elapsed = time_mod.monotonic() - batch_start_time
+                    if batch and elapsed >= BATCH_MAX_SECONDS:
+                        logger.info(f"Time-based flush: {len(batch)} spans after {elapsed:.0f}s")
+                        write_batch_to_delta(batch)
+                        batch = []
+                        batch_start_time = time_mod.monotonic()
                 continue
 
             try:
