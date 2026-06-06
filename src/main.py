@@ -51,9 +51,9 @@ def create_app():
     llm = LLMClient(app_metrics)
 
     research_agent = ResearchAgent(llm, rag, app_metrics)
-    flight_agent = FlightAgent(llm, tools, app_metrics)
-    hotel_agent = HotelAgent(llm, tools, app_metrics)
-    itinerary_agent = ItineraryAgent(llm, tools, app_metrics)
+    flight_agent = FlightAgent(llm, tools, mcp_client, app_metrics)
+    hotel_agent = HotelAgent(llm, tools, mcp_client, app_metrics)
+    itinerary_agent = ItineraryAgent(llm, tools, http_tool, mcp_client, app_metrics)
 
     orchestrator = OrchestratorAgent(
         llm=llm,

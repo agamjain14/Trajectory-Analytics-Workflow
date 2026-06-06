@@ -113,18 +113,19 @@ class ResearchAgent(BaseAgent):
 
 class FlightAgent(BaseAgent):
     """
-    Searches for flights using tool calls.
+    Searches for flights using MCP tool server.
     Handles flight comparisons and booking recommendations.
     """
 
-    def __init__(self, llm: LLMClient, tools: BuiltinTools, app_metrics: AppMetrics):
+    def __init__(self, llm: LLMClient, tools: BuiltinTools, mcp_client: MCPToolClient, app_metrics: AppMetrics):
         super().__init__("flight_agent", llm, app_metrics)
         self.tools = tools
+        self.mcp_client = mcp_client
 
     def search_flights(
         self, origin: str, destination: str, date: str, passengers: int = 1
     ) -> AgentMessage:
-        """Search flights and provide recommendations."""
+        """Search flights via MCP server and provide recommendations."""
         with get_tracer().start_as_current_span(self._create_span_name("search_flights")) as span:
             span.set_attribute("agent.name", self.name)
             span.set_attribute("agent.operation", "search_flights")
@@ -134,8 +135,16 @@ class FlightAgent(BaseAgent):
             span.set_attribute("agent.parameter.date", date)
             span.set_attribute("agent.parameter.passengers", passengers)
 
-            # Step 1: Call flight search tool
-            flight_results = self.tools.search_flights(origin, destination, date, passengers)
+            # Call MCP server for flight search
+            mcp_result = self.mcp_client.invoke_tool("search_flights", {
+                "origin": origin, "destination": destination,
+                "date": date, "passengers": passengers
+            })
+            if mcp_result.get("error"):
+                span.set_status(StatusCode.ERROR, "MCP search_flights failed")
+                raise RuntimeError(f"Flight search failed: {mcp_result.get('exception', 'MCP server unavailable')}")
+
+            flight_results = mcp_result["result"].get("result", {})
 
             # Step 2: LLM analyzes results and provides recommendation
             messages = [
@@ -151,7 +160,7 @@ class FlightAgent(BaseAgent):
                     "role": "user",
                     "content": (
                         f"Find flights from {origin} to {destination} on {date} for {passengers} passenger(s).\n\n"
-                        f"Available flights:\n{json.dumps(flight_results['flights'], indent=2)}\n\n"
+                        f"Available flights:\n{json.dumps(flight_results.get('flights', []), indent=2)}\n\n"
                         f"Analyze these options and recommend the best choice."
                     ),
                 },
@@ -165,7 +174,7 @@ class FlightAgent(BaseAgent):
                 agent=self.name,
                 origin=origin,
                 destination=destination,
-                options=len(flight_results["flights"]),
+                options=len(flight_results.get("flights", [])),
             )
 
             return AgentMessage(
@@ -179,18 +188,19 @@ class FlightAgent(BaseAgent):
 
 class HotelAgent(BaseAgent):
     """
-    Searches for hotels and accommodations.
+    Searches for hotels and accommodations via MCP server.
     Considers budget, preferences, and location.
     """
 
-    def __init__(self, llm: LLMClient, tools: BuiltinTools, app_metrics: AppMetrics):
+    def __init__(self, llm: LLMClient, tools: BuiltinTools, mcp_client: MCPToolClient, app_metrics: AppMetrics):
         super().__init__("hotel_agent", llm, app_metrics)
         self.tools = tools
+        self.mcp_client = mcp_client
 
     def search_hotels(
         self, city: str, checkin: str, checkout: str, guests: int = 1, budget: str = "mid-range"
     ) -> AgentMessage:
-        """Search hotels and provide recommendations."""
+        """Search hotels and weather via MCP server, provide recommendations."""
         with get_tracer().start_as_current_span(self._create_span_name("search_hotels")) as span:
             span.set_attribute("agent.name", self.name)
             span.set_attribute("agent.operation", "search_hotels")
@@ -201,11 +211,23 @@ class HotelAgent(BaseAgent):
             span.set_attribute("agent.parameter.guests", guests)
             span.set_attribute("agent.parameter.budget", budget)
 
-            # Step 1: Call hotel search tool
-            hotel_results = self.tools.search_hotels(city, checkin, checkout, guests)
+            # Step 1: Search hotels via MCP
+            mcp_hotels = self.mcp_client.invoke_tool("search_hotels", {
+                "city": city, "checkin": checkin, "checkout": checkout, "guests": guests
+            })
+            if mcp_hotels.get("error"):
+                span.set_status(StatusCode.ERROR, "MCP search_hotels failed")
+                raise RuntimeError(f"Hotel search failed: {mcp_hotels.get('exception', 'MCP server unavailable')}")
 
-            # Step 2: Get weather for the stay
-            weather = self.tools.get_weather(city, checkin)
+            hotel_results = mcp_hotels["result"].get("result", {})
+
+            # Step 2: Get weather via MCP
+            mcp_weather = self.mcp_client.invoke_tool("get_weather", {"city": city, "date": checkin})
+            if mcp_weather.get("error"):
+                span.set_status(StatusCode.ERROR, "MCP get_weather failed")
+                raise RuntimeError(f"Weather lookup failed: {mcp_weather.get('exception', 'MCP server unavailable')}")
+
+            weather = mcp_weather["result"].get("result", {})
 
             # Step 3: LLM recommendation
             messages = [
@@ -252,11 +274,14 @@ class ItineraryAgent(BaseAgent):
     """
     Creates day-by-day travel itineraries.
     Synthesizes research, flights, hotels, and activities into a cohesive plan.
+    Uses HTTP for external currency API, MCP for visa info.
     """
 
-    def __init__(self, llm: LLMClient, tools: BuiltinTools, app_metrics: AppMetrics):
+    def __init__(self, llm: LLMClient, tools: BuiltinTools, http_tool: HTTPTool, mcp_client: MCPToolClient, app_metrics: AppMetrics):
         super().__init__("itinerary_agent", llm, app_metrics)
         self.tools = tools
+        self.http_tool = http_tool
+        self.mcp_client = mcp_client
 
     def create_itinerary(
         self,
@@ -276,8 +301,26 @@ class ItineraryAgent(BaseAgent):
             span.set_attribute("agent.parameter.duration_days", duration_days)
             span.set_attribute("agent.parameter.interests", str(interests or []))
 
-            # Get currency info for budget
-            currency_info = self.tools.currency_convert(1000, "USD", "EUR")
+            # Get currency info via external HTTP API
+            http_result = self.http_tool.call(
+                "https://open.er-api.com/v6/latest/USD", method="GET"
+            )
+            if http_result.get("error"):
+                span.set_status(StatusCode.ERROR, "Currency API failed")
+                raise RuntimeError(f"Currency API failed: {http_result.get('exception', 'HTTP error')}")
+
+            rates = http_result["data"].get("rates", {})
+            eur_rate = rates.get("EUR", 0.92)
+            currency_info = {"converted": round(1000 * eur_rate, 2), "rate": eur_rate}
+
+            # Get visa info via MCP
+            mcp_visa = self.mcp_client.invoke_tool("get_visa_info", {
+                "nationality": "US", "destination": destination
+            })
+            if not mcp_visa.get("error"):
+                visa_info = mcp_visa["result"].get("result", {})
+            else:
+                visa_info = {"visa_required": "unknown", "note": "Could not check visa requirements"}
 
             messages = [
                 {
@@ -298,6 +341,7 @@ class ItineraryAgent(BaseAgent):
                         f"--- Flight Info ---\n{flights.content}\n\n"
                         f"--- Hotel Info ---\n{hotels.content}\n\n"
                         f"--- Currency ---\n$1000 USD = €{currency_info['converted']} EUR\n\n"
+                        f"--- Visa Info ---\n{json.dumps(visa_info)}\n\n"
                         f"Create a complete day-by-day itinerary with morning, afternoon, and evening activities."
                     ),
                 },

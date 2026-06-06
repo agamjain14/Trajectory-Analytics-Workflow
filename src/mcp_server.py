@@ -95,13 +95,34 @@ def _search_hotels(args: Dict) -> Dict:
 
 
 def _get_weather(args: Dict) -> Dict:
-    return {
-        "city": args.get("city"),
-        "temperature_high": 26,
-        "temperature_low": 18,
-        "condition": "partly cloudy",
-        "rain_chance": 20,
-    }
+    """Real weather data from wttr.in (free, no API key)."""
+    city = args.get("city", "London")
+    try:
+        resp = httpx.get(f"https://wttr.in/{city}?format=j1", timeout=10.0)
+        resp.raise_for_status()
+        data = resp.json()
+        current = data.get("current_condition", [{}])[0]
+        weather_area = data.get("nearest_area", [{}])[0]
+        return {
+            "city": city,
+            "temperature_high": int(current.get("temp_C", 0)),
+            "temperature_low": int(current.get("FeelsLikeC", 0)),
+            "condition": current.get("weatherDesc", [{}])[0].get("value", "unknown"),
+            "humidity": int(current.get("humidity", 0)),
+            "wind_speed": f"{current.get('windspeedKmph', 0)} km/h",
+            "rain_chance": int(current.get("precipMM", 0)),
+            "source": "wttr.in",
+        }
+    except Exception as e:
+        # Graceful degradation with simulated data
+        return {
+            "city": city,
+            "temperature_high": 26,
+            "temperature_low": 18,
+            "condition": "partly cloudy (simulated - API error)",
+            "rain_chance": 20,
+            "error": str(e),
+        }
 
 
 def _get_visa_info(args: Dict) -> Dict:
@@ -114,10 +135,37 @@ def _get_visa_info(args: Dict) -> Dict:
 
 
 def _currency_convert(args: Dict) -> Dict:
-    rates = {"USD_EUR": 0.92, "USD_JPY": 149.5, "USD_GBP": 0.79, "EUR_USD": 1.09}
-    key = f"{args['from_currency']}_{args['to_currency']}"
-    rate = rates.get(key, 1.0)
-    return {"converted": round(args["amount"] * rate, 2), "rate": rate}
+    """Real currency conversion from open.er-api.com (free, no API key)."""
+    amount = args.get("amount", 1)
+    from_cur = args.get("from_currency", "USD")
+    to_cur = args.get("to_currency", "EUR")
+    try:
+        resp = httpx.get(f"https://open.er-api.com/v6/latest/{from_cur}", timeout=10.0)
+        resp.raise_for_status()
+        data = resp.json()
+        rate = data.get("rates", {}).get(to_cur, 1.0)
+        return {
+            "from": from_cur,
+            "to": to_cur,
+            "amount": amount,
+            "converted": round(amount * rate, 2),
+            "rate": rate,
+            "source": "open.er-api.com",
+        }
+    except Exception as e:
+        # Graceful degradation with hardcoded rates
+        rates = {"USD_EUR": 0.92, "USD_JPY": 149.5, "USD_GBP": 0.79, "EUR_USD": 1.09}
+        key = f"{from_cur}_{to_cur}"
+        rate = rates.get(key, 1.0)
+        return {
+            "from": from_cur,
+            "to": to_cur,
+            "amount": amount,
+            "converted": round(amount * rate, 2),
+            "rate": rate,
+            "source": "hardcoded (API error)",
+            "error": str(e),
+        }
 
 
 TOOL_HANDLERS = {

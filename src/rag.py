@@ -90,32 +90,21 @@ class RAGRetriever:
 
     def _init_collection(self):
         """Initialize the ChromaDB collection with sample documents."""
-        with get_tracer().start_as_current_span(f"get_or_create_collection {self.collection_name}") as span:
-            # OTel Database Semantic Convention attributes
-            span.set_attribute("db.system", "chromadb")
-            span.set_attribute("db.operation.name", "get_or_create_collection")
-            span.set_attribute("db.collection.name", self.collection_name)
-            span.set_attribute("db.namespace", "rag")
+        self.collection = self.client.get_or_create_collection(
+            name=self.collection_name,
+            metadata={"hnsw:space": "cosine"},
+        )
 
-            self.collection = self.client.get_or_create_collection(
-                name=self.collection_name,
-                metadata={"hnsw:space": "cosine"},
+        # Only add documents if collection is empty
+        if self.collection.count() == 0:
+            get_logger().info(
+                "rag.seeding_documents", count=len(SAMPLE_DOCUMENTS)
             )
-
-            # Only add documents if collection is empty
-            if self.collection.count() == 0:
-                get_logger().info(
-                    "rag.seeding_documents", count=len(SAMPLE_DOCUMENTS)
-                )
-                self.collection.add(
-                    ids=[doc["id"] for doc in SAMPLE_DOCUMENTS],
-                    documents=[doc["text"] for doc in SAMPLE_DOCUMENTS],
-                    metadatas=[doc["metadata"] for doc in SAMPLE_DOCUMENTS],
-                )
-                span.set_attribute("db.operation.batch_size", len(SAMPLE_DOCUMENTS))
-                span.set_attribute("db.documents_seeded", len(SAMPLE_DOCUMENTS))
-            else:
-                span.set_attribute("db.response.returned_rows", self.collection.count())
+            self.collection.add(
+                ids=[doc["id"] for doc in SAMPLE_DOCUMENTS],
+                documents=[doc["text"] for doc in SAMPLE_DOCUMENTS],
+                metadatas=[doc["metadata"] for doc in SAMPLE_DOCUMENTS],
+            )
 
     def retrieve(self, query: str, n_results: int = 3) -> List[Dict[str, Any]]:
         """Retrieve relevant documents for a query with full tracing."""

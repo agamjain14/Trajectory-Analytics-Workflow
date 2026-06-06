@@ -142,12 +142,14 @@ async def lifespan(app: FastAPI):
     app_metrics = AppMetrics(meter)
     rag = RAGRetriever(app_metrics)
     tools = BuiltinTools(app_metrics)
+    http_tool = HTTPTool(app_metrics)
+    mcp_client = MCPToolClient(app_metrics)
     llm_client = LLMClient(app_metrics)
 
     research_agent = ResearchAgent(llm_client, rag, app_metrics)
-    flight_agent = FlightAgent(llm_client, tools, app_metrics)
-    hotel_agent = HotelAgent(llm_client, tools, app_metrics)
-    itinerary_agent = ItineraryAgent(llm_client, tools, app_metrics)
+    flight_agent = FlightAgent(llm_client, tools, mcp_client, app_metrics)
+    hotel_agent = HotelAgent(llm_client, tools, mcp_client, app_metrics)
+    itinerary_agent = ItineraryAgent(llm_client, tools, http_tool, mcp_client, app_metrics)
 
     orchestrator = OrchestratorAgent(
         llm=llm_client,
@@ -182,45 +184,34 @@ class NewSessionRequest(BaseModel):
 
 def extract_info_from_message(message: str, existing_context: dict) -> dict:
     """Use LLM to extract travel parameters and intent from user message."""
-    with tracer_instance.start_as_current_span("intent.extract") as span:
-        # Internal orchestration span
-        span.set_attribute("orchestration.type", "intent_extraction")
-        span.set_attribute("orchestration.input.user_message", message)
-        span.set_attribute("orchestration.input.existing_context", json.dumps(existing_context))
+    prompt = EXTRACT_INTENT_PROMPT.format(
+        message=message,
+        context=json.dumps(existing_context) if existing_context else "{}",
+    )
+    messages = [
+        {"role": "system", "content": "You extract structured travel info from user messages. Return only valid JSON."},
+        {"role": "user", "content": prompt},
+    ]
 
-        prompt = EXTRACT_INTENT_PROMPT.format(
-            message=message,
-            context=json.dumps(existing_context) if existing_context else "{}",
-        )
-        messages = [
-            {"role": "system", "content": "You extract structured travel info from user messages. Return only valid JSON."},
-            {"role": "user", "content": prompt},
-        ]
+    response = llm_client.chat(messages, agent_name="intent_parser", temperature=0.1)
+    content = response["content"].strip()
 
-        response = llm_client.chat(messages, agent_name="intent_parser", temperature=0.1)
-        content = response["content"].strip()
-
-        # Parse JSON from response
-        try:
-            # Handle cases where LLM wraps in markdown code block
-            if content.startswith("```"):
-                content = content.split("```")[1]
-                if content.startswith("json"):
-                    content = content[4:]
-            extracted = json.loads(content)
-            span.set_attribute("orchestration.output.extracted_fields", str(list(extracted.keys())))
-            span.set_attribute("orchestration.output.intent", extracted.get("intent", "unclear"))
-            span.set_status(StatusCode.OK)
-            return extracted
-        except json.JSONDecodeError:
-            span.set_status(StatusCode.ERROR, "json_parse_failed")
-            import re
-            match = re.search(r'\{[^}]+\}', content)
-            if match:
-                try:
-                    return json.loads(match.group())
-                except json.JSONDecodeError:
-                    pass
+    # Parse JSON from response
+    try:
+        # Handle cases where LLM wraps in markdown code block
+        if content.startswith("```"):
+            content = content.split("```")[1]
+            if content.startswith("json"):
+                content = content[4:]
+        return json.loads(content)
+    except json.JSONDecodeError:
+        import re
+        match = re.search(r'\{[^}]+\}', content)
+        if match:
+            try:
+                return json.loads(match.group())
+            except json.JSONDecodeError:
+                pass
             return {"intent": "plan_trip"}
 
 
@@ -239,11 +230,8 @@ def apply_smart_defaults(context: dict) -> dict:
 
 def generate_conversational_response(message: str, context: dict, history_summary: str) -> str:
     """Generate a natural conversational response (no trip execution)."""
-    with tracer_instance.start_as_current_span("chat.conversational") as span:
-        span.set_attribute("orchestration.type", "conversational_response")
-
-        destination = context.get("destination", "your destination")
-        prompt = f"""You are a travel assistant. The user already has a trip plan to {destination}.
+    destination = context.get("destination", "your destination")
+    prompt = f"""You are a travel assistant. The user already has a trip plan to {destination}.
 They just said: "{message}"
 
 Context of their trip: {json.dumps(context)}
@@ -253,14 +241,13 @@ If they ask a follow-up question, answer based on what you know.
 If they want to know more, offer suggestions.
 Keep it brief (2-3 sentences max). Remind them they can ask to modify the plan if they want changes."""
 
-        messages = [
-            {"role": "system", "content": "You are a friendly travel assistant. Be concise and helpful."},
-            {"role": "user", "content": prompt},
-        ]
+    messages = [
+        {"role": "system", "content": "You are a friendly travel assistant. Be concise and helpful."},
+        {"role": "user", "content": prompt},
+    ]
 
-        response = llm_client.chat(messages, agent_name="conversational", temperature=0.7)
-        span.set_status(StatusCode.OK)
-        return response["content"]
+    response = llm_client.chat(messages, agent_name="conversational", temperature=0.7)
+    return response["content"]
 
 
 # --- API Endpoints ---
@@ -270,95 +257,60 @@ async def serve_ui():
     return FileResponse("static/index.html")
 
 
+@app.get("/topology")
+async def serve_topology():
+    return FileResponse("static/topology.html")
+
+
 @app.get("/api/sessions")
 async def api_list_sessions():
-    with tracer_instance.start_as_current_span("GET /api/sessions") as span:
-        # OTel HTTP Server Semantic Convention
-        span.set_attribute("http.request.method", "GET")
-        span.set_attribute("http.route", "/api/sessions")
-        sessions = list_sessions(limit=50)
-        span.set_attribute("http.response.status_code", 200)
-        span.set_attribute("http.response.body.size", len(sessions))
-        return {"sessions": sessions}
+    sessions = list_sessions(limit=50)
+    return {"sessions": sessions}
 
 
 @app.post("/api/sessions")
 async def api_create_session(req: NewSessionRequest):
-    with tracer_instance.start_as_current_span("POST /api/sessions") as span:
-        # OTel HTTP Server Semantic Convention
-        span.set_attribute("http.request.method", "POST")
-        span.set_attribute("http.route", "/api/sessions")
-        session = create_session(title=req.title)
-        set_current_session_id(session["session_id"])
-        span.set_attribute("session.id", session["session_id"])
-        span.set_attribute("http.response.status_code", 200)
-        span.set_status(StatusCode.OK)
-        return session
+    session = create_session(title=req.title)
+    set_current_session_id(session["session_id"])
+    return session
 
 
 @app.get("/api/sessions/{session_id}")
 async def api_get_session(session_id: str):
     set_current_session_id(session_id)
-    with tracer_instance.start_as_current_span("GET /api/sessions/{session_id}") as span:
-        span.set_attribute("http.request.method", "GET")
-        span.set_attribute("http.route", "/api/sessions/{session_id}")
-        span.set_attribute("session.id", session_id)
-        session = get_session(session_id)
-        if not session:
-            span.set_attribute("http.response.status_code", 404)
-            raise HTTPException(status_code=404, detail="Session not found")
-        span.set_attribute("http.response.status_code", 200)
-        return session
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return session
 
 
 @app.get("/api/sessions/{session_id}/history")
 async def api_get_history(session_id: str):
     set_current_session_id(session_id)
-    with tracer_instance.start_as_current_span("GET /api/sessions/{session_id}/history") as span:
-        span.set_attribute("http.request.method", "GET")
-        span.set_attribute("http.route", "/api/sessions/{session_id}/history")
-        span.set_attribute("session.id", session_id)
-        session = get_session(session_id)
-        if not session:
-            span.set_attribute("http.response.status_code", 404)
-            raise HTTPException(status_code=404, detail="Session not found")
-        history = get_session_history(session_id)
-        span.set_attribute("http.response.status_code", 200)
-        span.set_attribute("http.response.body.size", len(history))
-        return {"session_id": session_id, "messages": history}
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    history = get_session_history(session_id)
+    return {"session_id": session_id, "messages": history}
 
 
 @app.post("/api/sessions/{session_id}/end")
 async def api_end_session(session_id: str):
     set_current_session_id(session_id)
-    with tracer_instance.start_as_current_span("POST /api/sessions/{session_id}/end") as span:
-        span.set_attribute("http.request.method", "POST")
-        span.set_attribute("http.route", "/api/sessions/{session_id}/end")
-        span.set_attribute("session.id", session_id)
-        session = get_session(session_id)
-        if not session:
-            span.set_attribute("http.response.status_code", 404)
-            raise HTTPException(status_code=404, detail="Session not found")
-        end_session(session_id)
-        span.set_attribute("http.response.status_code", 200)
-        span.set_status(StatusCode.OK)
-        return {"status": "ended", "session_id": session_id}
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    end_session(session_id)
+    return {"status": "ended", "session_id": session_id}
 
 
 @app.post("/api/sessions/{session_id}/resume")
 async def api_resume_session(session_id: str):
     set_current_session_id(session_id)
-    with tracer_instance.start_as_current_span("POST /api/sessions/{session_id}/resume") as span:
-        span.set_attribute("http.request.method", "POST")
-        span.set_attribute("http.route", "/api/sessions/{session_id}/resume")
-        span.set_attribute("session.id", session_id)
-        session = resume_session(session_id)
-        if not session:
-            span.set_attribute("http.response.status_code", 404)
-            raise HTTPException(status_code=404, detail="Session not found")
-        span.set_attribute("http.response.status_code", 200)
-        span.set_status(StatusCode.OK)
-        return session
+    session = resume_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return session
 
 
 @app.post("/api/chat")
@@ -381,25 +333,16 @@ async def api_chat(req: ChatRequest):
         root_span.set_attribute("orchestration.input.user_message", req.message)
 
         # --- Resolve session ---
-        with tracer_instance.start_as_current_span("session.resolve") as sess_span:
-            sess_span.set_attribute("orchestration.type", "session_management")
-            if req.session_id:
-                session = get_session(req.session_id)
-                if not session:
-                    # Session doesn't exist (e.g. DB was reset) — create a new one
-                    title = req.message[:50]
-                    session = create_session(title=title)
-                    sess_span.set_attribute("session.action", "recreated")
-                else:
-                    sess_span.set_attribute("session.action", "existing")
-            else:
+        if req.session_id:
+            session = get_session(req.session_id)
+            if not session:
                 title = req.message[:50]
                 session = create_session(title=title)
-                sess_span.set_attribute("session.action", "auto_created")
+        else:
+            title = req.message[:50]
+            session = create_session(title=title)
 
-            session_id = session["session_id"]
-            sess_span.set_attribute("session.id", session_id)
-            sess_span.set_status(StatusCode.OK)
+        session_id = session["session_id"]
 
         # Propagate session_id to ALL subsequent spans via context
         set_current_session_id(session_id)
@@ -409,23 +352,14 @@ async def api_chat(req: ChatRequest):
         root_span.set_attribute("session.turn.number", turn)
 
         # --- Save user message ---
-        with tracer_instance.start_as_current_span("session.save_user_message") as span:
-            span.set_attribute("orchestration.type", "session_management")
-            span.set_attribute("session.id", session_id)
-            add_message(session_id, turn, "user", req.message)
-            span.set_status(StatusCode.OK)
+        add_message(session_id, turn, "user", req.message)
 
         # --- Get existing context ---
-        with tracer_instance.start_as_current_span("session.load_context") as span:
-            span.set_attribute("orchestration.type", "session_management")
-            ctx = get_session_context(session_id)
-            current_params = ctx["params"]
-            state = ctx["state"]
-            span.set_attribute("session.state", state)
-            span.set_attribute("session.known_fields", str(list(current_params.keys())))
-            span.set_status(StatusCode.OK)
+        ctx = get_session_context(session_id)
+        current_params = ctx["params"]
+        state = ctx["state"]
 
-        # --- Extract info from this message ---
+        # --- Extract info from this message (intent classification) ---
         extracted = extract_info_from_message(req.message, current_params)
         intent = extracted.pop("intent", "plan_trip")
         extracted.pop("modification", None)
@@ -433,17 +367,11 @@ async def api_chat(req: ChatRequest):
         root_span.set_attribute("orchestration.output.extracted", json.dumps(extracted))
 
         # --- Merge extracted travel fields into context ---
-        with tracer_instance.start_as_current_span("session.merge_context") as span:
-            span.set_attribute("orchestration.type", "session_management")
-            # For modify_plan: don't overwrite destination unless explicitly changed
-            if intent == "modify_plan" and current_params.get("destination"):
-                extracted_dest = extracted.get("destination", "")
-                # Only overwrite destination if it's genuinely different and intentional
-                if extracted_dest and extracted_dest.lower() == current_params["destination"].lower():
-                    extracted.pop("destination", None)
-            current_params.update({k: v for k, v in extracted.items() if v})
-            span.set_attribute("session.merged_fields", str(list(current_params.keys())))
-            span.set_status(StatusCode.OK)
+        if intent == "modify_plan" and current_params.get("destination"):
+            extracted_dest = extracted.get("destination", "")
+            if extracted_dest and extracted_dest.lower() == current_params["destination"].lower():
+                extracted.pop("destination", None)
+        current_params.update({k: v for k, v in extracted.items() if v})
 
         # --- Handle conversational intent (no re-execution) ---
         if intent == "conversational" or (intent == "unclear" and state == "completed"):
@@ -474,7 +402,6 @@ async def api_chat(req: ChatRequest):
             has_destination = True
 
         if not has_destination:
-            # This is the ONLY question we ask — hardcoded, no LLM call, no randomness
             assistant_msg = "Where would you like to go? Just name the destination (e.g. 'Goa', 'Paris', 'Tokyo')."
             set_session_context(session_id, current_params, state="gathering")
             add_message(session_id, turn, "assistant", assistant_msg, metadata={"type": "ask_destination"})
@@ -499,12 +426,10 @@ async def api_chat(req: ChatRequest):
         # --- Apply smart defaults for anything not provided ---
         current_params = apply_smart_defaults(current_params)
 
-        # --- Execute trip planning ---
+        # --- Execute trip planning (PLAN span wraps only the agent pipeline) ---
         with tracer_instance.start_as_current_span("chat.execute_plan") as exec_span:
             exec_span.set_attribute("orchestration.type", "plan_execution")
             exec_span.set_attribute("session.id", session_id)
-            exec_span.set_attribute("agent.parameter.destination", current_params["destination"])
-            exec_span.set_attribute("agent.parameter.origin", current_params["origin"])
 
             set_session_context(session_id, current_params, state="executing")
 
@@ -519,26 +444,15 @@ async def api_chat(req: ChatRequest):
                 passengers = int(passengers) if passengers.isdigit() else 1
 
             # Run the full orchestrator pipeline (instrumented internally)
-            with tracer_instance.start_as_current_span(f"session.turn.{turn}") as turn_span:
-                turn_span.set_attribute("orchestration.type", "session_turn")
-                turn_span.set_attribute("session.id", session_id)
-                turn_span.set_attribute("session.turn.number", turn)
-                turn_span.set_attribute("agent.parameter.destination", current_params["destination"])
-
-                result = orchestrator.plan_trip(
-                    destination=current_params["destination"],
-                    origin=current_params["origin"],
-                    departure_date=current_params["departure_date"],
-                    return_date=current_params["return_date"],
-                    passengers=passengers,
-                    interests=interests_list,
-                    budget=current_params["budget"],
-                )
-
-                if result["status"] == "success":
-                    turn_span.set_status(StatusCode.OK)
-                else:
-                    turn_span.set_status(StatusCode.ERROR, result.get("error", "unknown"))
+            result = orchestrator.plan_trip(
+                destination=current_params["destination"],
+                origin=current_params["origin"],
+                departure_date=current_params["departure_date"],
+                return_date=current_params["return_date"],
+                passengers=passengers,
+                interests=interests_list,
+                budget=current_params["budget"],
+            )
 
             # Save result
             set_session_context(session_id, current_params, state="completed")

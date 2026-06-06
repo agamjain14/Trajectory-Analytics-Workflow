@@ -136,6 +136,10 @@ class MCPToolClient:
             span.set_attribute("server.address", parsed.hostname or "localhost")
             span.set_attribute("server.port", parsed.port or 8001)
 
+            # Store tool parameters
+            for k, v in arguments.items():
+                span.set_attribute(f"tool.parameter.{k}", str(v))
+
             start_time = time.time()
             try:
                 response = self.client.post(
@@ -150,13 +154,17 @@ class MCPToolClient:
                 )
 
                 if success:
+                    result_data = response.json()
+                    # Store response summary (truncated for large payloads)
+                    result_str = json.dumps(result_data.get("result", {}))
+                    span.set_attribute("tool.response", result_str[:2000])
                     span.set_status(StatusCode.OK)
                     get_logger().info(
                         "tool.mcp_invoke_success",
                         tool=tool_name,
                         duration_ms=round(duration * 1000, 2),
                     )
-                    return {"error": False, "result": response.json()}
+                    return {"error": False, "result": result_data}
                 else:
                     span.set_status(StatusCode.ERROR, f"MCP error {response.status_code}")
                     return {"error": True, "status_code": response.status_code}
