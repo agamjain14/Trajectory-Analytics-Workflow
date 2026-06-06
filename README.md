@@ -155,3 +155,126 @@ python -m src.main
 - Agent lifecycle events
 - Error details with stack traces
 - Performance annotations
+
+---
+
+## Streaming Analytics Pipeline
+
+Infrastructure-aware agent trajectory & quality observability. Correlates agent behavior, LLM-as-judge quality scores, and simulated GPU contention to identify infrastructure-driven degradation.
+
+### Architecture
+
+```
+trace_consumer (OTLP → Delta)
+       │
+       ▼
+┌─────────────────┐
+│ trace_delta_table│  ← Raw OTLP spans
+└────────┬────────┘
+         │
+         ▼ [Stream 1]
+┌─────────────────┐
+│   agent_steps   │  ← Classified & flattened spans
+└──┬──────┬─────┬─┘
+   │      │     │
+   ▼      ▼     ▼
+[S2]    [S3]   [S4]
+   │      │     │
+   ▼      │     ▼
+┌──────┐  │  ┌────────────────────────────────────┐
+│traj- │  │  │ gpu_metrics + network_metrics +     │
+│ectory│  │  │ request_routing                     │
+└──────┘  │  └────────────────────────────────────┘
+          ▼
+   ┌─────────────┐
+   │quality_scores│  ← LLM-as-judge (Ollama)
+   └──────┬──────┘
+          │
+          ▼ [Stream 5]
+   ┌─────────────────┐
+   │ trace_correlated │  ← Final joined table
+   └─────────────────┘
+          │
+          ▼
+   ┌─────────────┐
+   │analytics_api │  → Dashboard at :8002/analytics
+   └─────────────┘
+```
+
+### Streaming Jobs — Command Reference
+
+| Seq | Command | Source Table | Target Table(s) | Write Mode | Checkpoint |
+|-----|---------|-------------|-----------------|------------|------------|
+| 0 | `ollama serve` | — | — | — | — |
+| 1 | `python -m src.trace_consumer` | OTLP (port 4318) | `trace_delta_table` | Append | — |
+| 2 | `uvicorn src.chat_server:app --port 8000` | — | (generates traces) | — | — |
+| 3 | `python -m src.stream_agent_steps` | `trace_delta_table` | `agent_steps` | Delta MERGE (upsert on trace_id, session_id, span_id) | `data/checkpoints/agent_steps` |
+| 4 | `python -m src.stream_trajectory` | `agent_steps` | `trajectory_templates` | Delta MERGE (upsert on trace_id, session_id) | `data/checkpoints/trajectory` |
+| 5 | `python -m src.stream_quality` | `agent_steps` | `quality_scores` | Delta MERGE (upsert on trace_id, session_id) | `data/checkpoints/quality` |
+| 6 | `python -m src.stream_routing_infra` | `agent_steps` | `gpu_metrics`, `network_metrics`, `request_routing` | Delta MERGE (upsert on timestamp+node+gpu / trace_id+span_id) | `data/checkpoints/routing_infra` |
+| 7 | `python -m src.stream_correlated` | `quality_scores` | `trace_correlated` | Delta MERGE (upsert on trace_id, session_id) | `data/checkpoints/correlated` |
+| 8 | `uvicorn src.analytics_api:app --port 8002` | all Delta tables | — (serves API on :8002) | Read-only | — |
+
+**All streaming jobs (3-7) are independent Spark Structured Streaming processes** with 5-minute trigger intervals. Start them in any order — each will wait for its source table to have data.
+
+### Quick Start (All Terminals)
+
+```bash
+# Activate venv in each terminal
+source .venv/bin/activate
+
+# T1: LLM backend
+ollama serve
+
+# T2: OTLP trace ingestion
+python -m src.trace_consumer
+
+# T3: Chat agent (generates traces)
+uvicorn src.chat_server:app --reload --port 8000
+
+# T4-T8: Streaming jobs (one per terminal)
+python -m src.stream_agent_steps
+python -m src.stream_trajectory
+python -m src.stream_quality
+python -m src.stream_routing_infra
+python -m src.stream_correlated
+
+# T9: Analytics dashboard
+uvicorn src.analytics_api:app --port 8002
+```
+
+### Generate Traces
+
+```bash
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Plan a trip to Tokyo for 5 days"}'
+```
+
+### Verify Output
+
+```bash
+# Check row counts in all tables
+python -c "
+import deltalake as dl
+for t in ['trace_delta_table','agent_steps','trajectory_templates','quality_scores',
+          'gpu_metrics','network_metrics','request_routing','trace_correlated']:
+    try:
+        print(f'{t}: {dl.DeltaTable(f\"./data/{t}\").to_pyarrow_table().num_rows} rows')
+    except Exception as e:
+        print(f'{t}: ERROR - {e}')
+"
+
+# Or hit the API
+curl http://localhost:8002/api/traces | python -m json.tool
+curl http://localhost:8002/api/quality | python -m json.tool
+curl http://localhost:8002/api/correlation-summary | python -m json.tool
+```
+
+### Reset All Data
+
+```bash
+rm -rf data/checkpoints data/agent_steps data/trajectory_templates \
+       data/quality_scores data/gpu_metrics data/network_metrics \
+       data/request_routing data/trace_correlated
+```
