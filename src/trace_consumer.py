@@ -29,9 +29,9 @@ PULSAR_SUBSCRIPTION = os.getenv("PULSAR_SUBSCRIPTION", "trace-delta-writer")
 DELTA_TABLE_PATH = os.getenv("DELTA_TABLE_PATH", "./data/trace_delta_table")
 
 # Batching config
-BATCH_MAX_SIZE = int(os.getenv("CONSUMER_BATCH_SIZE", "200"))
+BATCH_MAX_SIZE = int(os.getenv("CONSUMER_BATCH_SIZE", "10"))
 # Time-based batching: set to 0 or empty to disable
-BATCH_MAX_SECONDS = int(os.getenv("CONSUMER_BATCH_TIMEOUT_SECONDS", "300"))  # 0 = disabled
+BATCH_MAX_SECONDS = int(os.getenv("CONSUMER_BATCH_TIMEOUT_SECONDS", "10"))  # 0 = disabled
 ENABLE_TIME_BATCHING = BATCH_MAX_SECONDS > 0
 
 # --- Arrow Schema ---

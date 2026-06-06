@@ -94,6 +94,8 @@ class LLMClient:
                 tokens = response.get("eval_count", len(content.split()) * 2)
 
                 span.set_attribute("llm.response_length", len(content))
+                span.set_attribute("llm.response", content)
+                span.set_attribute("llm.prompt", messages[-1]["content"] if messages else "")
                 span.set_attribute("llm.tokens", tokens)
                 span.set_attribute("llm.duration_ms", duration * 1000)
                 span.set_attribute("llm.retry_count", self._retry_count)

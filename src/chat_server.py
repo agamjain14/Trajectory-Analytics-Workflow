@@ -81,6 +81,12 @@ User: "make it luxury and add beaches"
 User: "change destination to Paris"
 → {{"intent": "modify_plan", "destination": "Paris"}}
 
+User: "give me detailed itinerary from India, family of 3, mid-budget, 10 days, mid september"
+→ {{"intent": "modify_plan", "origin": "India", "passengers": 3, "budget": "mid-range", "departure_date": "2026-09-15", "return_date": "2026-09-25"}}
+
+User: "from Mumbai, 2 people, luxury"
+→ {{"intent": "modify_plan", "origin": "Mumbai", "passengers": 2, "budget": "luxury"}}
+
 User: "no" or "whatever" or "you decide"
 → {{"intent": "proceed"}}
 
@@ -110,10 +116,15 @@ FIELDS TO EXTRACT (only if user stated them):
 
 RULES:
 - "X to Y" means origin=X, destination=Y
-- "2 pax" or "2 people" or "couple" → passengers=2
-- "week long" → return_date = departure_date + 7 days
+- "from X" means origin=X (departure city), do NOT treat it as destination
+- "to Y" means destination=Y
+- If previously collected already has a destination, do NOT overwrite it unless the user explicitly says "change destination to Z" or "I want to go to Z instead"
+- "2 pax" or "2 people" or "couple" → passengers=2, "family of N" → passengers=N
+- "week long" → return_date = departure_date + 7 days, "10 days" → return_date = departure_date + 10 days
+- "mid september" → departure_date = 2026-09-15
 - Do NOT treat typos/curse words as destinations (e.g. "godamm" is frustration, not a place)
 - If user is just reacting to a plan (positive/negative feedback without specific changes) → conversational
+- If previously collected has a destination and user is adding more details (origin, budget, dates, etc.), intent should be "modify_plan", NOT "plan_trip"
 - Return ONLY valid JSON, no explanation
 
 User message: "{message}"
@@ -391,6 +402,12 @@ async def api_chat(req: ChatRequest):
 
         # --- Merge extracted travel fields into context ---
         with tracer_instance.start_as_current_span("session.merge_context") as span:
+            # For modify_plan: don't overwrite destination unless explicitly changed
+            if intent == "modify_plan" and current_params.get("destination"):
+                extracted_dest = extracted.get("destination", "")
+                # Only overwrite destination if it's genuinely different and intentional
+                if extracted_dest and extracted_dest.lower() == current_params["destination"].lower():
+                    extracted.pop("destination", None)
             current_params.update({k: v for k, v in extracted.items() if v})
             span.set_attribute("context.merged_fields", list(current_params.keys()))
             span.set_status(StatusCode.OK)
@@ -402,6 +419,7 @@ async def api_chat(req: ChatRequest):
 
             request_duration = (time.time() - request_start) * 1000
             root_span.set_attribute("chat.action", "conversational")
+            root_span.set_attribute("chat.assistant_response", assistant_msg)
             root_span.set_attribute("chat.total_duration_ms", round(request_duration, 2))
             root_span.set_status(StatusCode.OK)
 
@@ -430,6 +448,7 @@ async def api_chat(req: ChatRequest):
 
             request_duration = (time.time() - request_start) * 1000
             root_span.set_attribute("chat.action", "ask_destination")
+            root_span.set_attribute("chat.assistant_response", assistant_msg)
             root_span.set_attribute("chat.total_duration_ms", round(request_duration, 2))
             root_span.set_status(StatusCode.OK)
 
@@ -518,6 +537,7 @@ async def api_chat(req: ChatRequest):
 
         request_duration = (time.time() - request_start) * 1000
         root_span.set_attribute("chat.action", "execute_plan")
+        root_span.set_attribute("chat.assistant_response", assistant_msg)
         root_span.set_attribute("chat.total_duration_ms", round(request_duration, 2))
 
         if result["status"] == "success":
