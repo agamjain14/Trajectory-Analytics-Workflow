@@ -22,6 +22,8 @@ from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExport
 from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
 
+from src.pulsar_exporter import PulsarSpanExporter
+
 import structlog
 
 load_dotenv()
@@ -34,18 +36,27 @@ _resource = Resource.create(
     }
 )
 
+_provider: TracerProvider | None = None
+
 
 def init_tracer() -> trace.Tracer:
-    """Initialize OpenTelemetry TracerProvider with OTLP + Console exporters."""
-    provider = TracerProvider(resource=_resource)
+    """Initialize OpenTelemetry TracerProvider with OTLP + Pulsar exporters."""
+    global _provider
+    _provider = TracerProvider(resource=_resource)
 
     otlp_endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
 
     # OTLP gRPC exporter (to collector/Jaeger/Tempo)
     otlp_exporter = OTLPSpanExporter(endpoint=otlp_endpoint, insecure=True)
-    provider.add_span_processor(BatchSpanProcessor(otlp_exporter))
+    _provider.add_span_processor(BatchSpanProcessor(otlp_exporter))
 
-    trace.set_tracer_provider(provider)
+    # Pulsar exporter (direct to Pulsar for streaming pipeline)
+    pulsar_exporter = PulsarSpanExporter(
+        service_name=os.getenv("OTEL_SERVICE_NAME", "trajectory-analytics-ai-app"),
+    )
+    _provider.add_span_processor(BatchSpanProcessor(pulsar_exporter))
+
+    trace.set_tracer_provider(_provider)
     return trace.get_tracer("trajectory.ai.app")
 
 
@@ -129,3 +140,12 @@ def init_telemetry():
     logger = init_logging()
     logger.info("telemetry.initialized")
     return tracer, meter, logger
+
+
+def shutdown_telemetry():
+    """Flush all pending telemetry and shut down providers."""
+    global _provider
+    if _provider:
+        _provider.force_flush()
+        _provider.shutdown()
+    logging.getLogger("telemetry").info("Telemetry shut down. All spans flushed.")

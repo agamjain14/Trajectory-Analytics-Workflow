@@ -5,9 +5,11 @@ This simulates an external MCP server that agents can call.
 """
 
 import time
-from typing import Dict, Any
+import os
+from typing import Dict, Any, Optional
 
-from fastapi import FastAPI, HTTPException
+import httpx
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
 app = FastAPI(title="Travel MCP Tool Server", version="0.1.0")
@@ -149,6 +151,34 @@ def invoke_tool(tool_name: str, request: ToolInvokeRequest):
 @app.get("/health")
 def health():
     return {"status": "healthy", "tools_available": len(TOOLS)}
+
+
+# --- Observability Query Endpoints ---
+
+JAEGER_URL = os.getenv("JAEGER_QUERY_URL", "http://localhost:16686")
+
+
+@app.get("/traces")
+def get_traces(
+    service: str = Query(default="trajectory-analytics-ai-app", description="Service name"),
+    limit: int = Query(default=20, description="Max traces to return"),
+    lookback: str = Query(default="1h", description="Lookback window (e.g. 1h, 2d)"),
+):
+    """Fetch traces from Jaeger and return with total count."""
+    params = {"service": service, "limit": limit, "lookback": lookback}
+    try:
+        resp = httpx.get(f"{JAEGER_URL}/api/traces", params=params, timeout=10.0)
+        resp.raise_for_status()
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"Jaeger query failed: {e}")
+
+    data = resp.json()
+    traces = data.get("data", [])
+    return {
+        "total": len(traces),
+        "service": service,
+        "traces": traces,
+    }
 
 
 if __name__ == "__main__":
