@@ -90,8 +90,12 @@ class RAGRetriever:
 
     def _init_collection(self):
         """Initialize the ChromaDB collection with sample documents."""
-        with get_tracer().start_as_current_span("rag.init_collection") as span:
-            span.set_attribute("rag.collection_name", self.collection_name)
+        with get_tracer().start_as_current_span(f"get_or_create_collection {self.collection_name}") as span:
+            # OTel Database Semantic Convention attributes
+            span.set_attribute("db.system", "chromadb")
+            span.set_attribute("db.operation.name", "get_or_create_collection")
+            span.set_attribute("db.collection.name", self.collection_name)
+            span.set_attribute("db.namespace", "rag")
 
             self.collection = self.client.get_or_create_collection(
                 name=self.collection_name,
@@ -108,16 +112,21 @@ class RAGRetriever:
                     documents=[doc["text"] for doc in SAMPLE_DOCUMENTS],
                     metadatas=[doc["metadata"] for doc in SAMPLE_DOCUMENTS],
                 )
-                span.set_attribute("rag.documents_seeded", len(SAMPLE_DOCUMENTS))
+                span.set_attribute("db.operation.batch_size", len(SAMPLE_DOCUMENTS))
+                span.set_attribute("db.documents_seeded", len(SAMPLE_DOCUMENTS))
             else:
-                span.set_attribute("rag.documents_existing", self.collection.count())
+                span.set_attribute("db.response.returned_rows", self.collection.count())
 
     def retrieve(self, query: str, n_results: int = 3) -> List[Dict[str, Any]]:
         """Retrieve relevant documents for a query with full tracing."""
-        with get_tracer().start_as_current_span("rag.retrieve") as span:
-            span.set_attribute("rag.query", query)
-            span.set_attribute("rag.n_results", n_results)
-            span.set_attribute("rag.collection", self.collection_name)
+        with get_tracer().start_as_current_span(f"findNearest {self.collection_name}") as span:
+            # OTel Database Semantic Convention attributes
+            span.set_attribute("db.system", "chromadb")
+            span.set_attribute("db.operation.name", "findNearest")
+            span.set_attribute("db.collection.name", self.collection_name)
+            span.set_attribute("db.namespace", "rag")
+            span.set_attribute("db.query.text", query)
+            span.set_attribute("db.operation.parameter.limit", n_results)
 
             start_time = time.time()
             try:
@@ -139,8 +148,7 @@ class RAGRetriever:
                         }
                     )
 
-                span.set_attribute("rag.results_count", len(documents))
-                span.set_attribute("rag.duration_ms", duration * 1000)
+                span.set_attribute("db.response.returned_rows", len(documents))
                 span.set_status(StatusCode.OK)
 
                 # Record metrics

@@ -75,12 +75,17 @@ class LLMClient:
         
         Returns dict with 'content', 'model', 'tokens', 'duration_ms'.
         """
-        with get_tracer().start_as_current_span("llm.chat") as span:
-            span.set_attribute("llm.model", self.model)
-            span.set_attribute("llm.agent", agent_name)
-            span.set_attribute("llm.temperature", temperature)
-            span.set_attribute("llm.messages_count", len(messages))
-            span.set_attribute("llm.system_prompt", messages[0]["content"][:200] if messages and messages[0]["role"] == "system" else "")
+        with get_tracer().start_as_current_span(f"chat {self.model}") as span:
+            # OTel GenAI Semantic Convention attributes
+            span.set_attribute("gen_ai.system", "ollama")
+            span.set_attribute("gen_ai.operation.name", "chat")
+            span.set_attribute("gen_ai.request.model", self.model)
+            span.set_attribute("gen_ai.request.temperature", temperature)
+            span.set_attribute("gen_ai.request.max_tokens", 0)  # Ollama default: unlimited
+            # Custom attributes (no standard equivalent)
+            span.set_attribute("gen_ai.agent.name", agent_name)
+            span.set_attribute("gen_ai.request.messages_count", len(messages))
+            span.set_attribute("gen_ai.prompt.system", messages[0]["content"][:200] if messages and messages[0]["role"] == "system" else "")
 
             self._retry_count = 0
             start_time = time.time()
@@ -93,12 +98,13 @@ class LLMClient:
                 # Estimate token count (Ollama provides eval_count)
                 tokens = response.get("eval_count", len(content.split()) * 2)
 
-                span.set_attribute("llm.response_length", len(content))
-                span.set_attribute("llm.response", content)
-                span.set_attribute("llm.prompt", messages[-1]["content"] if messages else "")
-                span.set_attribute("llm.tokens", tokens)
-                span.set_attribute("llm.duration_ms", duration * 1000)
-                span.set_attribute("llm.retry_count", self._retry_count)
+                span.set_attribute("gen_ai.response.model", self.model)
+                span.set_attribute("gen_ai.usage.output_tokens", tokens)
+                span.set_attribute("gen_ai.usage.input_tokens", response.get("prompt_eval_count", len(str(messages)) // 4))
+                span.set_attribute("gen_ai.response.content_length", len(content))
+                span.set_attribute("gen_ai.response.content", content)
+                span.set_attribute("gen_ai.prompt.user", messages[-1]["content"] if messages else "")
+                span.set_attribute("retry.count", self._retry_count)
                 span.set_status(StatusCode.OK)
 
                 # Record metrics
@@ -130,7 +136,7 @@ class LLMClient:
                 duration = time.time() - start_time
                 span.set_status(StatusCode.ERROR, str(e))
                 span.record_exception(e)
-                span.set_attribute("llm.retry_count", self._retry_count)
+                span.set_attribute("retry.count", self._retry_count)
 
                 self.metrics.record_llm_error(
                     model=self.model, agent=agent_name, error_type=type(e).__name__
@@ -147,9 +153,11 @@ class LLMClient:
 
     def generate_embedding(self, text: str) -> List[float]:
         """Generate embeddings using Ollama (for custom RAG if needed)."""
-        with get_tracer().start_as_current_span("llm.embedding") as span:
-            span.set_attribute("llm.model", self.model)
-            span.set_attribute("llm.input_length", len(text))
+        with get_tracer().start_as_current_span(f"embeddings {self.model}") as span:
+            span.set_attribute("gen_ai.system", "ollama")
+            span.set_attribute("gen_ai.operation.name", "embeddings")
+            span.set_attribute("gen_ai.request.model", self.model)
+            span.set_attribute("gen_ai.request.input_length", len(text))
 
             try:
                 response = self.client.embeddings(model=self.model, prompt=text)

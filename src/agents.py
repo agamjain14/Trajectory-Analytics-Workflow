@@ -54,9 +54,13 @@ class ResearchAgent(BaseAgent):
     def research_destination(self, destination: str, interests: List[str] = None) -> AgentMessage:
         """Research a destination using RAG + LLM reasoning."""
         with get_tracer().start_as_current_span(self._create_span_name("research_destination")) as span:
+            # Agent classification attributes
             span.set_attribute("agent.name", self.name)
-            span.set_attribute("agent.destination", destination)
-            span.set_attribute("agent.interests", str(interests or []))
+            span.set_attribute("agent.operation", "research_destination")
+            span.set_attribute("agent.framework", "custom")
+            # Operation-specific parameters
+            span.set_attribute("agent.parameter.destination", destination)
+            span.set_attribute("agent.parameter.interests", str(interests or []))
 
             # Step 1: RAG retrieval
             query = f"{destination} travel guide tips"
@@ -89,7 +93,7 @@ class ResearchAgent(BaseAgent):
 
             response = self.llm.chat(messages, agent_name=self.name)
 
-            span.set_attribute("agent.rag_docs_used", len(docs))
+            span.set_attribute("agent.output.rag_docs_used", len(docs))
             span.set_status(StatusCode.OK)
 
             get_logger().info(
@@ -123,9 +127,12 @@ class FlightAgent(BaseAgent):
         """Search flights and provide recommendations."""
         with get_tracer().start_as_current_span(self._create_span_name("search_flights")) as span:
             span.set_attribute("agent.name", self.name)
-            span.set_attribute("flight.origin", origin)
-            span.set_attribute("flight.destination", destination)
-            span.set_attribute("flight.date", date)
+            span.set_attribute("agent.operation", "search_flights")
+            span.set_attribute("agent.framework", "custom")
+            span.set_attribute("agent.parameter.origin", origin)
+            span.set_attribute("agent.parameter.destination", destination)
+            span.set_attribute("agent.parameter.date", date)
+            span.set_attribute("agent.parameter.passengers", passengers)
 
             # Step 1: Call flight search tool
             flight_results = self.tools.search_flights(origin, destination, date, passengers)
@@ -186,10 +193,13 @@ class HotelAgent(BaseAgent):
         """Search hotels and provide recommendations."""
         with get_tracer().start_as_current_span(self._create_span_name("search_hotels")) as span:
             span.set_attribute("agent.name", self.name)
-            span.set_attribute("hotel.city", city)
-            span.set_attribute("hotel.checkin", checkin)
-            span.set_attribute("hotel.checkout", checkout)
-            span.set_attribute("hotel.budget", budget)
+            span.set_attribute("agent.operation", "search_hotels")
+            span.set_attribute("agent.framework", "custom")
+            span.set_attribute("agent.parameter.city", city)
+            span.set_attribute("agent.parameter.checkin", checkin)
+            span.set_attribute("agent.parameter.checkout", checkout)
+            span.set_attribute("agent.parameter.guests", guests)
+            span.set_attribute("agent.parameter.budget", budget)
 
             # Step 1: Call hotel search tool
             hotel_results = self.tools.search_hotels(city, checkin, checkout, guests)
@@ -260,8 +270,11 @@ class ItineraryAgent(BaseAgent):
         """Create a complete itinerary from all gathered information."""
         with get_tracer().start_as_current_span(self._create_span_name("create_itinerary")) as span:
             span.set_attribute("agent.name", self.name)
-            span.set_attribute("itinerary.destination", destination)
-            span.set_attribute("itinerary.duration_days", duration_days)
+            span.set_attribute("agent.operation", "create_itinerary")
+            span.set_attribute("agent.framework", "custom")
+            span.set_attribute("agent.parameter.destination", destination)
+            span.set_attribute("agent.parameter.duration_days", duration_days)
+            span.set_attribute("agent.parameter.interests", str(interests or []))
 
             # Get currency info for budget
             currency_info = self.tools.currency_convert(1000, "USD", "EUR")
@@ -349,11 +362,15 @@ class OrchestratorAgent(BaseAgent):
         """
         with get_tracer().start_as_current_span("agent.orchestrator.plan_trip") as span:
             span.set_attribute("agent.name", self.name)
-            span.set_attribute("trip.destination", destination)
-            span.set_attribute("trip.origin", origin)
-            span.set_attribute("trip.departure_date", departure_date)
-            span.set_attribute("trip.return_date", return_date)
-            span.set_attribute("trip.passengers", passengers)
+            span.set_attribute("agent.operation", "plan_trip")
+            span.set_attribute("agent.framework", "custom")
+            span.set_attribute("agent.parameter.destination", destination)
+            span.set_attribute("agent.parameter.origin", origin)
+            span.set_attribute("agent.parameter.departure_date", departure_date)
+            span.set_attribute("agent.parameter.return_date", return_date)
+            span.set_attribute("agent.parameter.passengers", passengers)
+            span.set_attribute("agent.parameter.budget", budget)
+            span.set_attribute("agent.parameter.interests", str(interests or []))
 
             self.metrics.agent_active.add(1, {"agent": self.name})
             workflow_start = time.time()

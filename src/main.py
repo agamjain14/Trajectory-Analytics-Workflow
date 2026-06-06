@@ -132,9 +132,10 @@ def run_session_turn(orchestrator, session_id: str, turn: int, tracer) -> dict |
     destination = user_input
 
     with tracer.start_as_current_span(f"session.turn.{turn}") as turn_span:
+        turn_span.set_attribute("orchestration.type", "session_turn")
         turn_span.set_attribute("session.id", session_id)
-        turn_span.set_attribute("turn.number", turn)
-        turn_span.set_attribute("turn.destination", destination)
+        turn_span.set_attribute("session.turn.number", turn)
+        turn_span.set_attribute("agent.parameter.destination", destination)
 
         # Ask follow-up details
         print(f"\n  Planning trip to: {destination}")
@@ -148,10 +149,10 @@ def run_session_turn(orchestrator, session_id: str, turn: int, tracer) -> dict |
         passengers = int(passengers_str) if passengers_str.isdigit() else 1
         interests = [i.strip() for i in interests_str.split(",")]
 
-        turn_span.set_attribute("turn.origin", origin)
-        turn_span.set_attribute("turn.departure_date", dep_date)
-        turn_span.set_attribute("turn.return_date", ret_date)
-        turn_span.set_attribute("turn.passengers", passengers)
+        turn_span.set_attribute("agent.parameter.origin", origin)
+        turn_span.set_attribute("agent.parameter.departure_date", dep_date)
+        turn_span.set_attribute("agent.parameter.return_date", ret_date)
+        turn_span.set_attribute("agent.parameter.passengers", passengers)
 
         # Save user message
         user_msg = f"Plan trip to {destination} from {origin}, {dep_date} to {ret_date}, {passengers} pax, interests: {interests_str}, budget: {budget}"

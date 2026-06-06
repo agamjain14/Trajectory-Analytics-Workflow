@@ -28,10 +28,15 @@ class HTTPTool:
         self, url: str, method: str = "GET", payload: Optional[Dict] = None, headers: Optional[Dict] = None
     ) -> Dict[str, Any]:
         """Execute an HTTP tool call with full span instrumentation."""
-        with get_tracer().start_as_current_span("tool.http_call") as span:
-            span.set_attribute("tool.type", "http")
-            span.set_attribute("http.method", method)
-            span.set_attribute("http.url", url)
+        with get_tracer().start_as_current_span(f"HTTP {method.upper()}") as span:
+            # OTel HTTP Client Semantic Convention attributes
+            span.set_attribute("http.request.method", method.upper())
+            span.set_attribute("url.full", url)
+            # Extract server address from URL
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            span.set_attribute("server.address", parsed.hostname or "")
+            span.set_attribute("server.port", parsed.port or (443 if parsed.scheme == "https" else 80))
 
             start_time = time.time()
             try:
@@ -45,8 +50,8 @@ class HTTPTool:
                     raise ValueError(f"Unsupported HTTP method: {method}")
 
                 duration = time.time() - start_time
-                span.set_attribute("http.status_code", response.status_code)
-                span.set_attribute("http.response_size", len(response.content))
+                span.set_attribute("http.response.status_code", response.status_code)
+                span.set_attribute("http.response.body.size", len(response.content))
 
                 success = response.status_code < 400
                 self.metrics.record_tool_call(
@@ -99,13 +104,19 @@ class MCPToolClient:
 
     def list_tools(self) -> Dict[str, Any]:
         """List available tools from the MCP server."""
-        with get_tracer().start_as_current_span("tool.mcp_list_tools") as span:
-            span.set_attribute("tool.type", "mcp")
-            span.set_attribute("mcp.server_url", self.server_url)
+        with get_tracer().start_as_current_span("travel-tools/list_tools") as span:
+            # OTel RPC Semantic Convention attributes
+            span.set_attribute("rpc.system", "mcp")
+            span.set_attribute("rpc.service", "travel-tools")
+            span.set_attribute("rpc.method", "list_tools")
+            from urllib.parse import urlparse
+            parsed = urlparse(self.server_url)
+            span.set_attribute("server.address", parsed.hostname or "localhost")
+            span.set_attribute("server.port", parsed.port or 8001)
 
             try:
                 response = self.client.get(f"{self.server_url}/tools")
-                span.set_attribute("mcp.tools_count", len(response.json().get("tools", [])))
+                span.set_attribute("rpc.response.tools_count", len(response.json().get("tools", [])))
                 return response.json()
             except Exception as e:
                 span.set_status(StatusCode.ERROR, str(e))
@@ -115,10 +126,15 @@ class MCPToolClient:
 
     def invoke_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """Invoke a tool on the MCP server with tracing."""
-        with get_tracer().start_as_current_span("tool.mcp_invoke") as span:
-            span.set_attribute("tool.type", "mcp")
-            span.set_attribute("tool.name", tool_name)
-            span.set_attribute("mcp.server_url", self.server_url)
+        with get_tracer().start_as_current_span(f"travel-tools/{tool_name}") as span:
+            # OTel RPC Semantic Convention attributes
+            span.set_attribute("rpc.system", "mcp")
+            span.set_attribute("rpc.service", "travel-tools")
+            span.set_attribute("rpc.method", tool_name)
+            from urllib.parse import urlparse
+            parsed = urlparse(self.server_url)
+            span.set_attribute("server.address", parsed.hostname or "localhost")
+            span.set_attribute("server.port", parsed.port or 8001)
 
             start_time = time.time()
             try:
@@ -166,11 +182,15 @@ class BuiltinTools:
 
     def search_flights(self, origin: str, destination: str, date: str, passengers: int = 1) -> Dict[str, Any]:
         """Simulated flight search tool."""
-        with get_tracer().start_as_current_span("tool.builtin.search_flights") as span:
-            span.set_attribute("tool.name", "search_flights")
-            span.set_attribute("tool.input.origin", origin)
-            span.set_attribute("tool.input.destination", destination)
-            span.set_attribute("tool.input.date", date)
+        with get_tracer().start_as_current_span("builtin/search_flights") as span:
+            # OTel RPC Semantic Convention attributes (local tool as RPC)
+            span.set_attribute("rpc.system", "tool")
+            span.set_attribute("rpc.service", "builtin")
+            span.set_attribute("rpc.method", "search_flights")
+            span.set_attribute("tool.parameter.origin", origin)
+            span.set_attribute("tool.parameter.destination", destination)
+            span.set_attribute("tool.parameter.date", date)
+            span.set_attribute("tool.parameter.passengers", passengers)
 
             start_time = time.time()
             # Simulated flight results
@@ -221,11 +241,14 @@ class BuiltinTools:
 
     def search_hotels(self, city: str, checkin: str, checkout: str, guests: int = 1) -> Dict[str, Any]:
         """Simulated hotel search tool."""
-        with get_tracer().start_as_current_span("tool.builtin.search_hotels") as span:
-            span.set_attribute("tool.name", "search_hotels")
-            span.set_attribute("tool.input.city", city)
-            span.set_attribute("tool.input.checkin", checkin)
-            span.set_attribute("tool.input.checkout", checkout)
+        with get_tracer().start_as_current_span("builtin/search_hotels") as span:
+            span.set_attribute("rpc.system", "tool")
+            span.set_attribute("rpc.service", "builtin")
+            span.set_attribute("rpc.method", "search_hotels")
+            span.set_attribute("tool.parameter.city", city)
+            span.set_attribute("tool.parameter.checkin", checkin)
+            span.set_attribute("tool.parameter.checkout", checkout)
+            span.set_attribute("tool.parameter.guests", guests)
 
             start_time = time.time()
             result = {
@@ -269,10 +292,12 @@ class BuiltinTools:
 
     def get_weather(self, city: str, date: str) -> Dict[str, Any]:
         """Simulated weather forecast tool."""
-        with get_tracer().start_as_current_span("tool.builtin.get_weather") as span:
-            span.set_attribute("tool.name", "get_weather")
-            span.set_attribute("tool.input.city", city)
-            span.set_attribute("tool.input.date", date)
+        with get_tracer().start_as_current_span("builtin/get_weather") as span:
+            span.set_attribute("rpc.system", "tool")
+            span.set_attribute("rpc.service", "builtin")
+            span.set_attribute("rpc.method", "get_weather")
+            span.set_attribute("tool.parameter.city", city)
+            span.set_attribute("tool.parameter.date", date)
 
             start_time = time.time()
             result = {
@@ -295,10 +320,12 @@ class BuiltinTools:
 
     def get_visa_info(self, nationality: str, destination: str) -> Dict[str, Any]:
         """Simulated visa requirement lookup tool."""
-        with get_tracer().start_as_current_span("tool.builtin.get_visa_info") as span:
-            span.set_attribute("tool.name", "get_visa_info")
-            span.set_attribute("tool.input.nationality", nationality)
-            span.set_attribute("tool.input.destination", destination)
+        with get_tracer().start_as_current_span("builtin/get_visa_info") as span:
+            span.set_attribute("rpc.system", "tool")
+            span.set_attribute("rpc.service", "builtin")
+            span.set_attribute("rpc.method", "get_visa_info")
+            span.set_attribute("tool.parameter.nationality", nationality)
+            span.set_attribute("tool.parameter.destination", destination)
 
             start_time = time.time()
             result = {
@@ -319,9 +346,13 @@ class BuiltinTools:
 
     def currency_convert(self, amount: float, from_currency: str, to_currency: str) -> Dict[str, Any]:
         """Simulated currency conversion tool."""
-        with get_tracer().start_as_current_span("tool.builtin.currency_convert") as span:
-            span.set_attribute("tool.name", "currency_convert")
-            span.set_attribute("tool.input.amount", amount)
+        with get_tracer().start_as_current_span("builtin/currency_convert") as span:
+            span.set_attribute("rpc.system", "tool")
+            span.set_attribute("rpc.service", "builtin")
+            span.set_attribute("rpc.method", "currency_convert")
+            span.set_attribute("tool.parameter.amount", amount)
+            span.set_attribute("tool.parameter.from_currency", from_currency)
+            span.set_attribute("tool.parameter.to_currency", to_currency)
 
             start_time = time.time()
             # Simulated rates
