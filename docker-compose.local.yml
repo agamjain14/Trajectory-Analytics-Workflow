@@ -39,13 +39,13 @@ services:
     networks:
       - app
 
-  # Pull the model on first run
+  # Pull both models on first run (1B for agents, 3B for intent parsing)
   ollama-init:
     image: ollama/ollama:latest
     depends_on:
       ollama:
         condition: service_healthy
-    entrypoint: ["sh", "-c", "ollama pull llama3.2:1b && echo 'Model ready'"]
+    entrypoint: ["sh", "-c", "ollama pull llama3.2:1b && ollama pull llama3.2 && echo 'Models ready'"]
     environment:
       - OLLAMA_HOST=ollama:11434
     networks:
@@ -152,6 +152,34 @@ services:
     networks:
       - app
       - observability
+
+  # --- Streaming ETL (PySpark + Delta Lake) ---
+  streaming:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        DEPLOY_MODE: streaming
+    environment:
+      - DEPLOY_MODE=streaming
+      - LLM_BACKEND=ollama
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - EVAL_MODEL=llama3.2:1b
+      - JUDGE_BACKEND=ollama
+      - DATA_PATH=/app/data
+      - TRIGGER_INTERVAL=30 seconds
+    depends_on:
+      app:
+        condition: service_healthy
+    volumes:
+      - app-data:/app/data
+    restart: on-failure
+    deploy:
+      resources:
+        reservations:
+          memory: 2G
+    networks:
+      - app
 
 networks:
   app:

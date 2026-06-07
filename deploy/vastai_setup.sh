@@ -20,11 +20,10 @@ GITHUB_REPO="${GITHUB_REPO:-https://github.com/YOUR_USER/Trajectory-Analytics-Wo
 echo "==> Setting up $ROLE node: $NODE_ID"
 
 # --- Common setup ---
-# Nuke broken azcmagent from previous runs (postinst needs systemd, can't be removed cleanly)
-if dpkg -l azcmagent 2>/dev/null | grep -q '^.i'; then
-  rm -f /var/lib/dpkg/info/azcmagent.*
-  dpkg --configure -a 2>/dev/null || true
-fi
+# Nuke broken azcmagent (postinst needs systemd user 'himds' that doesn't exist on vast.ai)
+rm -f /var/lib/dpkg/info/azcmagent.*
+dpkg --remove --force-remove-reinstreq azcmagent 2>/dev/null || true
+dpkg --configure -a 2>/dev/null || true
 apt-get update && apt-get install -y python3-pip python3-venv iputils-ping git curl wget
 
 if [ ! -d /workspace/trajectory ]; then

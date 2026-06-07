@@ -35,13 +35,17 @@ case "$MODE" in
     python3 -m src.network_collector
     ;;
   streaming)
-    # One-shot: run all streaming jobs then exit
-    echo "==> Running streaming ETL jobs"
-    python3 -m src.stream_routing_infra
-    python3 -m src.stream_correlated
-    python3 -m src.stream_trajectory
-    python3 -m src.stream_quality
-    echo "==> Streaming jobs complete"
+    # Long-running: start all streaming jobs concurrently
+    echo "==> Starting streaming ETL jobs (all 5 concurrently)..."
+    python3 -m src.stream_agent_steps &
+    python3 -m src.stream_trajectory &
+    python3 -m src.stream_quality &
+    python3 -m src.stream_routing_infra &
+    python3 -m src.stream_correlated &
+    echo "==> All 5 streaming jobs launched"
+    # Wait for any to exit (crash = restart via Docker)
+    wait -n
+    echo "==> A streaming job exited, container stopping"
     ;;
   *)
     echo "Unknown DEPLOY_MODE: $MODE"
