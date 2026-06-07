@@ -118,22 +118,6 @@ jobs:
               apt-get update && apt-get install -y docker-compose-plugin
           fi
 
-          # Install Ollama (CPU-only on Azure VM)
-          if ! command -v ollama &>/dev/null; then
-              curl -fsSL https://ollama.com/install.sh | sh
-          fi
-
-          # Start Ollama and pull model
-          if ! curl -sf http://localhost:11434/ >/dev/null 2>&1; then
-              nohup ollama serve > /tmp/ollama.log 2>&1 &
-              disown
-              for i in $(seq 1 30); do
-                  curl -sf http://localhost:11434/ >/dev/null 2>&1 && break
-                  sleep 1
-              done
-          fi
-          ollama pull llama3.2
-
           # Clone or update repo
           REPO_DIR="/home/azureuser/app"
           if [ -d "$REPO_DIR/.git" ]; then
@@ -144,7 +128,7 @@ jobs:
           fi
           cd "$REPO_DIR"
 
-          # Write .env (Ollama runs on host, Docker accesses via host.docker.internal)
+          # Write .env (Ollama is tunneled from Vast.ai via SSH, Docker accesses via host.docker.internal)
           cat > .env <<ENVEOF
           LLM_BACKEND=ollama
           OLLAMA_BASE_URL=http://host.docker.internal:11434
@@ -162,9 +146,6 @@ jobs:
 
           echo "=== Container status ==="
           docker compose ps
-          echo ""
-          echo "=== Ollama models ==="
-          ollama list 2>/dev/null || echo "ollama list skipped"
           REMOTESCRIPT
 
           # Inject the actual repo name
@@ -176,6 +157,27 @@ jobs:
             --name "$AZURE_VM" \
             --command-id RunShellScript \
             --scripts "$SCRIPT_CONTENT"
+
+      - name: Setup SSH tunnel to Vast.ai Ollama
+        if: inputs.node1_ip != ''
+        run: |
+          # Write Vast.ai SSH key to Azure VM and create tunnel to Vast.ai Ollama (GPU)
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" | base64 | \
+            az vm run-command invoke -g "$AZURE_RG" -n "$AZURE_VM" \
+              --command-id RunShellScript \
+              --scripts "
+                echo \"\$(cat /dev/stdin)\" | base64 -d > /tmp/vastai_key
+                chmod 600 /tmp/vastai_key
+                pkill -f 'ssh.*11434' 2>/dev/null || true
+                systemctl stop ollama 2>/dev/null || true
+                sleep 1
+                ssh -o StrictHostKeyChecking=no -i /tmp/vastai_key -f -N \
+                  -L 0.0.0.0:11434:localhost:11434 \
+                  root@${{ inputs.node1_ip }} -p ${{ inputs.node1_ssh_port }}
+                sleep 2
+                curl -sf http://localhost:11434/ && echo 'Ollama tunnel OK'
+                curl -sf http://172.17.0.1:11434/ && echo 'Docker bridge OK'
+              " -o none 2>/dev/null || echo "Tunnel setup attempted"
 
       - name: Verify deployment
         run: |
@@ -258,7 +260,7 @@ jobs:
           echo "  Grafana:     http://$VM_IP:3000  (admin/admin)"
           echo "  Status:      http://$VM_IP:8000/ingest/status"
           echo ""
-          echo "  LLM:         Ollama (llama3.2) running on VM (CPU)"
+          echo "  LLM:         Ollama (llama3.2) via SSH tunnel to Vast.ai GPU"
           echo "  Cost:        ~\$0.096/hr for ${{ inputs.vm_size }}"
           echo ""
           echo "  Stop billing: az vm deallocate -g $AZURE_RG -n $AZURE_VM"
