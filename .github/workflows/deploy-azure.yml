@@ -91,7 +91,7 @@ jobs:
 
       - name: Open ports
         run: |
-          for PORT_INFO in "8000:1000" "16686:1001" "9090:1002" "3000:1003" "8081:1004"; do
+          for PORT_INFO in "8000:998" "16686:1001" "9090:1002" "3000:1003" "8081:1004"; do
             PORT="${PORT_INFO%%:*}"
             PRIORITY="${PORT_INFO##*:}"
             az vm open-port -g "$AZURE_RG" -n "$AZURE_VM" \
@@ -100,12 +100,11 @@ jobs:
           echo "Ports open: 8000 (app), 16686 (Jaeger), 9090 (Prometheus), 3000 (Grafana), 8081 (Pulsar)"
 
       - name: Deploy application
+        env:
+          GH_REPO: ${{ github.repository }}
         run: |
-          az vm run-command invoke \
-            --resource-group "$AZURE_RG" \
-            --name "$AZURE_VM" \
-            --command-id RunShellScript \
-            --scripts '
+          # Write the remote script to a temp file to avoid quoting hell
+          cat > /tmp/deploy_remote.sh <<'REMOTESCRIPT'
           set -e
 
           # Install Docker
@@ -140,7 +139,7 @@ jobs:
               cd "$REPO_DIR" && git pull origin main
           else
               rm -rf "$REPO_DIR"
-              git clone https://github.com/'"${{ github.repository }}"'.git "$REPO_DIR"
+              git clone "https://github.com/GITHUB_REPO_PLACEHOLDER.git" "$REPO_DIR"
           fi
           cd "$REPO_DIR"
 
@@ -151,7 +150,7 @@ jobs:
           OLLAMA_MODEL=llama3.2
           DEPLOY_MODE=cloud
           ENVEOF
-          sed -i "s/^[[:space:]]*//" .env
+          sed -i 's/^[[:space:]]*//' .env
 
           # Ensure data directories
           mkdir -p data/gpu_metrics data/network_metrics data/agent_steps data/trace_correlated
@@ -165,7 +164,17 @@ jobs:
           echo ""
           echo "=== Ollama models ==="
           ollama list
-          '
+          REMOTESCRIPT
+
+          # Inject the actual repo name
+          sed -i "s|GITHUB_REPO_PLACEHOLDER|${GH_REPO}|g" /tmp/deploy_remote.sh
+
+          SCRIPT_CONTENT=$(cat /tmp/deploy_remote.sh)
+          az vm run-command invoke \
+            --resource-group "$AZURE_RG" \
+            --name "$AZURE_VM" \
+            --command-id RunShellScript \
+            --scripts "$SCRIPT_CONTENT"
 
       - name: Verify deployment
         run: |
