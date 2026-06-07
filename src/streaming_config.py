@@ -65,6 +65,25 @@ TOPOLOGY = {
 }
 
 # --- Schemas ---
+# Source table: raw OTLP spans written by trace_consumer (deltalake/PyArrow)
+SOURCE_SCHEMA = StructType([
+    StructField("trace_id", StringType()),
+    StructField("session_id", StringType()),
+    StructField("span_id", StringType()),
+    StructField("parent_span_id", StringType()),
+    StructField("operation_name", StringType()),
+    StructField("service_name", StringType()),
+    StructField("start_time_unix_nano", LongType()),
+    StructField("end_time_unix_nano", LongType()),
+    StructField("duration_ns", LongType()),
+    StructField("status_code", StringType()),
+    StructField("status_message", StringType()),
+    StructField("warning", StringType()),
+    StructField("tags", StringType()),
+    StructField("references", StringType()),
+    StructField("ingested_at", StringType()),
+])
+
 AGENT_STEPS_SCHEMA = StructType([
     StructField("trace_id", StringType(), False),
     StructField("session_id", StringType(), False),
@@ -197,10 +216,14 @@ def create_spark_session(app_name: str) -> SparkSession:
 
 
 def ensure_delta_table(spark: SparkSession, path: str, schema: StructType):
-    """Create an empty partitioned Delta table if it doesn't exist."""
+    """Create an empty Delta table if it doesn't exist. Partitions by ingestion_date/hour when available."""
     if not DeltaTable.isDeltaTable(spark, path):
         empty_df = spark.createDataFrame([], schema)
-        empty_df.write.format("delta").partitionBy("ingestion_date", "ingestion_hour").save(path)
+        field_names = {f.name for f in schema.fields}
+        writer = empty_df.write.format("delta")
+        if "ingestion_date" in field_names and "ingestion_hour" in field_names:
+            writer = writer.partitionBy("ingestion_date", "ingestion_hour")
+        writer.save(path)
 
 
 # --- Span classification utilities ---

@@ -38,7 +38,8 @@ fi
 export OLLAMA_HOST=0.0.0.0:11434
 # Start ollama only if not already running
 if ! curl -sf http://localhost:11434/ >/dev/null 2>&1; then
-  ollama serve &
+  nohup ollama serve > /tmp/ollama.log 2>&1 &
+  disown
   # Wait until ollama is responsive (up to 30s)
   for i in $(seq 1 30); do
     curl -sf http://localhost:11434/ >/dev/null 2>&1 && break

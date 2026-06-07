@@ -18,7 +18,7 @@ from delta import DeltaTable
 
 from src.streaming_config import (
     AGENT_STEPS_PATH, TRAJECTORY_PATH, CHECKPOINT_BASE, TRIGGER_INTERVAL,
-    TRAJECTORY_SCHEMA, create_spark_session, ensure_delta_table,
+    AGENT_STEPS_SCHEMA, TRAJECTORY_SCHEMA, create_spark_session, ensure_delta_table,
 )
 
 logger = logging.getLogger("stream_trajectory")
@@ -121,6 +121,7 @@ def main():
     spark = create_spark_session("Stream_Trajectory")
     spark.sparkContext.setLogLevel("WARN")
 
+    ensure_delta_table(spark, AGENT_STEPS_PATH, AGENT_STEPS_SCHEMA)
     ensure_delta_table(spark, TRAJECTORY_PATH, TRAJECTORY_SCHEMA)
 
     stream_df = spark.readStream.format("delta").load(AGENT_STEPS_PATH)

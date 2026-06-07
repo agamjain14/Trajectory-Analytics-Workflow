@@ -18,7 +18,7 @@ from delta import DeltaTable
 from src.streaming_config import (
     TRAJECTORY_PATH, QUALITY_PATH, ROUTING_PATH,
     GPU_METRICS_PATH, NETWORK_METRICS_PATH, CORRELATED_PATH,
-    CHECKPOINT_BASE, TRIGGER_INTERVAL, CORRELATED_SCHEMA,
+    CHECKPOINT_BASE, TRIGGER_INTERVAL, QUALITY_SCHEMA, CORRELATED_SCHEMA,
     create_spark_session, ensure_delta_table,
 )
 
@@ -211,6 +211,7 @@ def main():
     spark = create_spark_session("Stream_Correlated")
     spark.sparkContext.setLogLevel("WARN")
 
+    ensure_delta_table(spark, QUALITY_PATH, QUALITY_SCHEMA)
     ensure_delta_table(spark, CORRELATED_PATH, CORRELATED_SCHEMA)
 
     stream_df = spark.readStream.format("delta").load(QUALITY_PATH)

@@ -18,7 +18,7 @@ from delta import DeltaTable
 
 from src.streaming_config import (
     SOURCE_PATH, AGENT_STEPS_PATH, CHECKPOINT_BASE, TRIGGER_INTERVAL,
-    LOOKBACK_HOURS, AGENT_STEPS_SCHEMA,
+    LOOKBACK_HOURS, SOURCE_SCHEMA, AGENT_STEPS_SCHEMA,
     create_spark_session, ensure_delta_table,
     should_drop, classify_span, flatten_tags,
 )
@@ -133,6 +133,7 @@ def main():
     spark = create_spark_session("Stream_AgentSteps")
     spark.sparkContext.setLogLevel("WARN")
 
+    ensure_delta_table(spark, SOURCE_PATH, SOURCE_SCHEMA)
     ensure_delta_table(spark, AGENT_STEPS_PATH, AGENT_STEPS_SCHEMA)
 
     stream_df = spark.readStream.format("delta").load(SOURCE_PATH)

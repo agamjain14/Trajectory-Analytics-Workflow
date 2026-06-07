@@ -20,7 +20,7 @@ from delta import DeltaTable
 from src.streaming_config import (
     AGENT_STEPS_PATH, GPU_METRICS_PATH, NETWORK_METRICS_PATH, ROUTING_PATH,
     CHECKPOINT_BASE, TRIGGER_INTERVAL, TOPOLOGY,
-    GPU_METRICS_SCHEMA, NETWORK_METRICS_SCHEMA, ROUTING_SCHEMA,
+    AGENT_STEPS_SCHEMA, GPU_METRICS_SCHEMA, NETWORK_METRICS_SCHEMA, ROUTING_SCHEMA,
     NODE_1_ID, NODE_2_ID,
     create_spark_session, ensure_delta_table,
 )
@@ -195,6 +195,7 @@ def main():
     spark = create_spark_session("Stream_RoutingInfra")
     spark.sparkContext.setLogLevel("WARN")
 
+    ensure_delta_table(spark, AGENT_STEPS_PATH, AGENT_STEPS_SCHEMA)
     ensure_delta_table(spark, GPU_METRICS_PATH, GPU_METRICS_SCHEMA)
     ensure_delta_table(spark, NETWORK_METRICS_PATH, NETWORK_METRICS_SCHEMA)
     ensure_delta_table(spark, ROUTING_PATH, ROUTING_SCHEMA)

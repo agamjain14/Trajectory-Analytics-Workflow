@@ -35,7 +35,29 @@ case "$MODE" in
     python3 -m src.network_collector
     ;;
   streaming)
-    # Long-running: start all streaming jobs concurrently
+    # Pre-download Delta/Spark Ivy dependencies with a single session
+    # to avoid race conditions when 5 sessions start concurrently
+    echo "==> Pre-downloading Spark/Delta dependencies..."
+    python3 -c "
+from src.streaming_config import (
+    create_spark_session, ensure_delta_table,
+    SOURCE_PATH, AGENT_STEPS_PATH, TRAJECTORY_PATH, QUALITY_PATH,
+    GPU_METRICS_PATH, NETWORK_METRICS_PATH, ROUTING_PATH, CORRELATED_PATH,
+    SOURCE_SCHEMA, AGENT_STEPS_SCHEMA, TRAJECTORY_SCHEMA, QUALITY_SCHEMA,
+    GPU_METRICS_SCHEMA, NETWORK_METRICS_SCHEMA, ROUTING_SCHEMA, CORRELATED_SCHEMA,
+)
+spark = create_spark_session('TableInit')
+ensure_delta_table(spark, SOURCE_PATH, SOURCE_SCHEMA)
+ensure_delta_table(spark, AGENT_STEPS_PATH, AGENT_STEPS_SCHEMA)
+ensure_delta_table(spark, TRAJECTORY_PATH, TRAJECTORY_SCHEMA)
+ensure_delta_table(spark, QUALITY_PATH, QUALITY_SCHEMA)
+ensure_delta_table(spark, GPU_METRICS_PATH, GPU_METRICS_SCHEMA)
+ensure_delta_table(spark, NETWORK_METRICS_PATH, NETWORK_METRICS_SCHEMA)
+ensure_delta_table(spark, ROUTING_PATH, ROUTING_SCHEMA)
+ensure_delta_table(spark, CORRELATED_PATH, CORRELATED_SCHEMA)
+spark.stop()
+print('All Delta tables initialized')
+"
     echo "==> Starting streaming ETL jobs (all 5 concurrently)..."
     python3 -m src.stream_agent_steps &
     python3 -m src.stream_trajectory &

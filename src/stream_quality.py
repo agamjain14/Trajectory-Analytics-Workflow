@@ -19,7 +19,7 @@ from delta import DeltaTable
 
 from src.streaming_config import (
     AGENT_STEPS_PATH, QUALITY_PATH, CHECKPOINT_BASE, TRIGGER_INTERVAL,
-    OLLAMA_BASE_URL, EVAL_MODEL, QUALITY_SCHEMA,
+    OLLAMA_BASE_URL, EVAL_MODEL, AGENT_STEPS_SCHEMA, QUALITY_SCHEMA,
     JUDGE_BACKEND, AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_KEY,
     AZURE_OPENAI_DEPLOYMENT, AZURE_OPENAI_API_VERSION,
     create_spark_session, ensure_delta_table,
@@ -214,6 +214,7 @@ def main():
     spark = create_spark_session("Stream_Quality")
     spark.sparkContext.setLogLevel("WARN")
 
+    ensure_delta_table(spark, AGENT_STEPS_PATH, AGENT_STEPS_SCHEMA)
     ensure_delta_table(spark, QUALITY_PATH, QUALITY_SCHEMA)
 
     stream_df = spark.readStream.format("delta").load(AGENT_STEPS_PATH)
