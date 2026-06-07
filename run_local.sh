@@ -69,7 +69,8 @@ export LLM_BACKEND=ollama
 export DEPLOY_MODE=local
 export OLLAMA_BASE_URL=http://host.docker.internal:11434
 
-docker compose up -d --build
+# Start only infrastructure services (not the app — it runs natively below)
+docker compose up -d otel-collector jaeger prometheus grafana pulsar
 echo "  ✓ Infrastructure running"
 echo "    Waiting for Pulsar to be ready..."
 sleep 10
@@ -105,5 +106,11 @@ export LLM_BACKEND=ollama
 export OLLAMA_BASE_URL=http://localhost:11434
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
 export DATA_DIR=./data
+
+# Start MCP tool server (search_flights, search_hotels, etc.) in background
+echo "  Starting MCP tool server on :8001..."
+uvicorn src.mcp_server:app --host 0.0.0.0 --port 8001 &
+MCP_PID=$!
+trap "kill $MCP_PID 2>/dev/null" EXIT
 
 uvicorn src.chat_server:app --host 0.0.0.0 --port 8000 --reload

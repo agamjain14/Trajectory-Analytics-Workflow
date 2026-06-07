@@ -26,6 +26,9 @@ services:
       - "11434:11434"
     volumes:
       - ollama-models:/root/.ollama
+    environment:
+      - OLLAMA_NUM_PARALLEL=1
+      - OLLAMA_MAX_LOADED_MODELS=1
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 10s
@@ -35,7 +38,7 @@ services:
     deploy:
       resources:
         reservations:
-          memory: 4G
+          memory: 2G
     networks:
       - app
 
@@ -162,7 +165,7 @@ services:
     deploy:
       resources:
         reservations:
-          memory: 2G
+          memory: 1G
     networks:
       - app
 

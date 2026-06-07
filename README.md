@@ -6,13 +6,13 @@
 
 ## Problem Statement
 
-Modern AI agents (multi-step LLM workflows) are opaque. When an orchestrator delegates to specialist sub-agents, each making LLM calls, RAG retrievals, and tool invocations, there is no way to:
+Multi-agent AI systems are opaque—when an orchestrator delegates to sub-agents making LLM calls, RAG retrievals, and tool invocations, operators cannot:
 
-1. **Trace the full execution path** across agents, LLM calls, retrievals, and tool invocations in a single request.
-2. **Score response quality** automatically using LLM-as-judge and correlate quality drops with specific trajectory patterns.
-3. **Attribute performance degradation to infrastructure** — determine whether a slow or low-quality response was caused by agent logic or GPU contention, network latency, or routing decisions.
+1. **Trace execution paths** across the full agent call graph
+2. **Score response quality** and correlate quality drops to trajectory patterns
+3. **Attribute degradation to infrastructure** (GPU contention, network latency, routing)
 
-This project solves all three by building an end-to-end observable AI agent system: a multi-agent travel planner instrumented with OpenTelemetry, feeding a Spark Structured Streaming pipeline that classifies spans, extracts trajectory templates, scores quality via LLM-as-judge, simulates GPU/network infrastructure, and joins everything into a correlated analytics view.
+**Solution:** End-to-end observable AI agent system—a travel planner instrumented with OpenTelemetry, feeding Spark Structured Streaming that extracts trajectory templates, scores quality via LLM-as-judge, simulates infrastructure metrics, and joins everything into a correlated analytics view.
 
 ## Architecture
 

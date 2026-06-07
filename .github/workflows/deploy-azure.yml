@@ -14,19 +14,19 @@ on:
       azure_location:
         description: 'Azure region'
         required: true
-        default: 'eastus'
+        default: 'eastus2'
       vm_size:
         description: 'Azure VM size'
         required: true
-        default: 'Standard_B2s'
-      ollama_base_url:
-        description: 'Ollama URL (Vast.ai node). Leave empty to skip LLM.'
+        default: 'Standard_D2s_v7'
+      ollama_model:
+        description: 'Ollama model to use'
         required: false
-        default: ''
+        default: 'llama3.2'
       node1_ip:
         description: 'Vast.ai Node 1 IP (for GPU collector push)'
         required: false
-        default: ''
+        default: '142.126.17.171'
       node1_ssh_port:
         description: 'Vast.ai Node 1 SSH port'
         required: false
@@ -34,7 +34,7 @@ on:
       node2_ip:
         description: 'Vast.ai Node 2 IP (for GPU collector push)'
         required: false
-        default: ''
+        default: '174.116.164.194'
       node2_ssh_port:
         description: 'Vast.ai Node 2 SSH port'
         required: false
@@ -101,17 +101,6 @@ jobs:
 
       - name: Deploy application
         run: |
-          OLLAMA_URL="${{ inputs.ollama_base_url }}"
-          if [ -z "$OLLAMA_URL" ]; then
-            OLLAMA_URL="http://host.docker.internal:11434"
-          fi
-
-          # Build env content — escape for heredoc inside az run-command
-          ENV_CONTENT="LLM_BACKEND=ollama
-          OLLAMA_BASE_URL=${OLLAMA_URL}
-          OLLAMA_MODEL=llama3.2
-          DEPLOY_MODE=cloud"
-
           az vm run-command invoke \
             --resource-group "$AZURE_RG" \
             --name "$AZURE_VM" \
@@ -129,25 +118,39 @@ jobs:
               apt-get update && apt-get install -y docker-compose-plugin
           fi
 
+          # Install Ollama (CPU-only on Azure VM)
+          if ! command -v ollama &>/dev/null; then
+              curl -fsSL https://ollama.com/install.sh | sh
+          fi
+
+          # Start Ollama and pull model
+          if ! curl -sf http://localhost:11434/ >/dev/null 2>&1; then
+              nohup ollama serve > /tmp/ollama.log 2>&1 &
+              disown
+              for i in $(seq 1 30); do
+                  curl -sf http://localhost:11434/ >/dev/null 2>&1 && break
+                  sleep 1
+              done
+          fi
+          ollama pull llama3.2
+
           # Clone or update repo
           REPO_DIR="/home/azureuser/app"
           if [ -d "$REPO_DIR/.git" ]; then
               cd "$REPO_DIR" && git pull origin main
           else
               rm -rf "$REPO_DIR"
-              git clone https://github.com/${{ github.repository }}.git "$REPO_DIR"
+              git clone https://github.com/'"${{ github.repository }}"'.git "$REPO_DIR"
           fi
           cd "$REPO_DIR"
 
-          # Write .env
+          # Write .env (Ollama runs on host, Docker accesses via host.docker.internal)
           cat > .env <<ENVEOF
           LLM_BACKEND=ollama
-          OLLAMA_BASE_URL='"${OLLAMA_URL}"'
+          OLLAMA_BASE_URL=http://host.docker.internal:11434
           OLLAMA_MODEL=llama3.2
           DEPLOY_MODE=cloud
           ENVEOF
-
-          # Clean up leading whitespace from heredoc
           sed -i "s/^[[:space:]]*//" .env
 
           # Ensure data directories
@@ -159,6 +162,9 @@ jobs:
 
           echo "=== Container status ==="
           docker compose ps
+          echo ""
+          echo "=== Ollama models ==="
+          ollama list
           '
 
       - name: Verify deployment
@@ -176,22 +182,23 @@ jobs:
           done
           curl -sf --max-time 5 "http://$VM_IP:8000/docs" >/dev/null 2>&1 || echo "App may still be building containers. Check in 2-3 minutes."
 
+      - name: Setup SSH for Vast.ai
+        if: inputs.node1_ip != ''
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
       - name: Connect Vast.ai collectors (optional)
         if: inputs.node1_ip != ''
+        continue-on-error: true
         run: |
           VM_IP="${{ steps.vm.outputs.vm_ip }}"
 
-          # Setup SSH
-          mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-
-          # Point Node 1 collectors at Azure VM
+          # Point Node 1 collectors at Azure VM (Vast.ai can reach Azure's public IP)
           if [ -n "${{ inputs.node1_ip }}" ]; then
-            echo "Configuring Node 1 (${{ inputs.node1_ip }}) to push to Azure ($VM_IP)..."
+            echo "Configuring Node 1 (${{ inputs.node1_ip }}) to push metrics to Azure ($VM_IP)..."
             ssh -p ${{ inputs.node1_ssh_port }} -o StrictHostKeyChecking=no \
               root@${{ inputs.node1_ip }} bash -s <<REMOTE
-            # Kill existing collectors if running
             pkill -f gpu_collector || true
             pkill -f network_collector || true
             sleep 2
@@ -208,7 +215,7 @@ jobs:
 
           # Point Node 2 collectors at Azure VM
           if [ -n "${{ inputs.node2_ip }}" ]; then
-            echo "Configuring Node 2 (${{ inputs.node2_ip }}) to push to Azure ($VM_IP)..."
+            echo "Configuring Node 2 (${{ inputs.node2_ip }}) to push metrics to Azure ($VM_IP)..."
             ssh -p ${{ inputs.node2_ssh_port }} -o StrictHostKeyChecking=no \
               root@${{ inputs.node2_ip }} bash -s <<REMOTE
             pkill -f gpu_collector || true
@@ -229,22 +236,23 @@ jobs:
         run: |
           VM_IP="${{ steps.vm.outputs.vm_ip }}"
           echo "============================================"
-          echo "  AZURE DEPLOYMENT COMPLETE"
+          echo "  DEPLOYMENT COMPLETE — PUBLIC LINKS"
           echo "============================================"
           echo ""
-          echo "  Chat:        http://$VM_IP:8000/static/index.html"
+          echo "  Chat UI:     http://$VM_IP:8000/static/index.html"
           echo "  Analytics:   http://$VM_IP:8000/static/analytics.html"
+          echo "  Topology:    http://$VM_IP:8000/static/topology.html"
           echo "  API Docs:    http://$VM_IP:8000/docs"
           echo "  Jaeger:      http://$VM_IP:16686"
           echo "  Prometheus:  http://$VM_IP:9090"
           echo "  Grafana:     http://$VM_IP:3000  (admin/admin)"
           echo "  Status:      http://$VM_IP:8000/ingest/status"
           echo ""
-          echo "  Cost: ~\$0.012/hr for ${{ inputs.vm_size }}"
+          echo "  LLM:         Ollama (llama3.2) running on VM (CPU)"
+          echo "  Cost:        ~\$0.096/hr for ${{ inputs.vm_size }}"
           echo ""
           echo "  Stop billing: az vm deallocate -g $AZURE_RG -n $AZURE_VM"
-          echo "  Restart:      az vm start -g $AZURE_RG -n $AZURE_VM"
-          echo "  Tear down:    Run this workflow again with action=teardown"
+          echo "  Tear down:    Run this workflow with action=teardown"
           echo "============================================"
 
   teardown:
