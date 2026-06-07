@@ -1,89 +1,242 @@
-# Trajectory Analytics Workflow - AI Travel Agent
+# Trajectory Analytics Workflow
 
-A fully instrumented multi-agent AI travel planning application that demonstrates comprehensive observability with OpenTelemetry. Uses Ollama (local LLM) for reasoning, ChromaDB for RAG, and simulated travel tool APIs.
+## Team
+
+- **Agam Jain**
+
+## Problem Statement
+
+Modern AI agents (multi-step LLM workflows) are opaque. When an orchestrator delegates to specialist sub-agents, each making LLM calls, RAG retrievals, and tool invocations, there is no way to:
+
+1. **Trace the full execution path** across agents, LLM calls, retrievals, and tool invocations in a single request.
+2. **Score response quality** automatically using LLM-as-judge and correlate quality drops with specific trajectory patterns.
+3. **Attribute performance degradation to infrastructure** — determine whether a slow or low-quality response was caused by agent logic or GPU contention, network latency, or routing decisions.
+
+This project solves all three by building an end-to-end observable AI agent system: a multi-agent travel planner instrumented with OpenTelemetry, feeding a Spark Structured Streaming pipeline that classifies spans, extracts trajectory templates, scores quality via LLM-as-judge, simulates GPU/network infrastructure, and joins everything into a correlated analytics view.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    User Request: "Plan a trip to Paris"          │
-└────────────────────────────────┬────────────────────────────────┘
-                                 │
-                    ┌────────────▼────────────┐
-                    │   Orchestrator Agent     │
-                    │   (routes & synthesizes) │
-                    └──┬──────┬──────┬──────┬─┘
-                       │      │      │      │
-          ┌────────────▼┐  ┌──▼────┐ ┌▼─────┐ ┌▼──────────┐
-          │  Research    │  │Flight │ │Hotel │ │ Itinerary │
-          │  Agent       │  │Agent  │ │Agent │ │ Agent     │
-          │  (RAG+LLM)  │  │(Tools)│ │(Tools)│ │(Synthesis)│
-          └──────┬───────┘  └──┬────┘ └──┬───┘ └───────────┘
-                 │             │         │
-          ┌──────▼───────┐  ┌──▼─────────▼──┐
-          │  ChromaDB    │  │  Travel Tools  │
-          │  (Vector DB) │  │  (HTTP / MCP)  │
-          └──────────────┘  └───────────────-┘
-                 │                   │
-          ┌──────▼───────┐  ┌───────▼────────┐
-          │  Ollama LLM  │  │  MCP Server    │
-          │  (reasoning) │  │  (FastAPI)     │
-          └──────────────┘  └────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                          AI AGENT APPLICATION LAYER                         │
+│                                                                              │
+│   User ──▶ Chat Server (FastAPI :8000)                                       │
+│                 │                                                            │
+│            Orchestrator Agent                                                │
+│            ┌────┼─────┬──────┐                                               │
+│            ▼    ▼     ▼      ▼                                               │
+│       Research Flight Hotel Itinerary                                        │
+│       Agent   Agent  Agent  Agent                                            │
+│       (RAG+   (Tool  (Tool  (LLM                                            │
+│        LLM)   +LLM)  +LLM)  Synthesis)                                      │
+│         │       │      │       │                                             │
+│    ChromaDB  Builtin/MCP Tools │           All spans instrumented with       │
+│         │       │      │       │           OpenTelemetry (traces, metrics,   │
+│       Ollama ◀─┘──────┘───────┘           structured logs)                  │
+└──────────┬───────────────────────────────────────────────────────────────────┘
+           │
+           │ OTLP gRPC/HTTP (spans, metrics, logs)
+           ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                        TELEMETRY COLLECTION LAYER                           │
+│                                                                              │
+│   OTel Collector ──▶ Jaeger (traces)                                         │
+│        │          ──▶ Prometheus (metrics)                                    │
+│        │          ──▶ Grafana (dashboards)                                    │
+│                                                                              │
+│   Pulsar Span Exporter ──▶ Apache Pulsar ──▶ Trace Consumer ──▶ Delta Lake   │
+└──────────────────────────────┬───────────────────────────────────────────────┘
+                               │
+                               ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                   SPARK STRUCTURED STREAMING PIPELINE                       │
+│                                                                              │
+│   trace_delta_table (raw OTLP spans)                                         │
+│         │                                                                    │
+│         ▼ Stream 1                                                           │
+│   agent_steps (classified & flattened spans)                                 │
+│         │                                                                    │
+│         ├──▶ Stream 2 ──▶ trajectory_templates (trajectory signatures)       │
+│         ├──▶ Stream 3 ──▶ quality_scores (LLM-as-judge via Ollama)           │
+│         └──▶ Stream 4 ──▶ gpu_metrics, network_metrics, request_routing      │
+│                           (simulated infra: GPU contention, topology routing) │
+│                                                                              │
+│   quality_scores                                                             │
+│         └──▶ Stream 5 ──▶ trace_correlated (joined: trajectory + quality     │
+│                            + routing + GPU/network metrics)                  │
+└──────────────────────────────┬───────────────────────────────────────────────┘
+                               │
+                               ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                          ANALYTICS & DASHBOARD                              │
+│                                                                              │
+│   Analytics API (FastAPI :8002) ──▶ Dashboard UI                             │
+│     /api/traces, /api/quality, /api/correlation-summary                      │
+│     LLM-powered natural language summaries of quality & infrastructure       │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Telemetry Signals Emitted
+## Low-Level Design — Streaming Pipeline
 
-| Signal | What's Captured | Exporter |
-|--------|----------------|----------|
-| **Traces** | Full request journey across agents, LLM calls, RAG retrieval, tool invocations | OTLP → Jaeger |
-| **Metrics** | LLM latency/tokens, agent handoffs, RAG retrieval time, tool call duration, retry counts, workflow duration | OTLP → Prometheus |
-| **Logs** | Structured logs with trace context correlation, agent lifecycle events, errors | OTLP → Collector |
+```
+═══════════════════════════════════════════════════════════════════════════════
+ TELEMETRY EXPORT
+═══════════════════════════════════════════════════════════════════════════════
+
+  Chat Server / Agents
+       │
+       ├── OTLP gRPC ──▶ OTel Collector ──▶ Jaeger (traces)
+       │                                 ──▶ Prometheus (metrics)
+       │
+       └── SDK ──▶ Pulsar Span Exporter ──▶ Apache Pulsar (topic: otlp-traces)
+
+═══════════════════════════════════════════════════════════════════════════════
+ INGESTION (trace_consumer)
+═══════════════════════════════════════════════════════════════════════════════
+
+  Apache Pulsar ──▶ trace_consumer ──▶ [trace_delta_table] (raw OTLP spans)
+
+═══════════════════════════════════════════════════════════════════════════════
+ SPARK STRUCTURED STREAMING (5 independent jobs, Delta MERGE upserts)
+═══════════════════════════════════════════════════════════════════════════════
+
+  [trace_delta_table]
+       │
+       ▼
+  ┌─ Stream 1 (stream_agent_steps) ─────────────────────────────────────────┐
+  │  Classify & flatten spans → span_kind, agent, model, tokens, etc.       │
+  │  Output: [agent_steps]                                                  │
+  └─────────────────────────────────────────────────────────────────────────┘
+       │
+       ├───────────────────────────┬────────────────────────────────┐
+       ▼                           ▼                                ▼
+  ┌─ Stream 2 ──────────┐   ┌─ Stream 3 ──────────┐   ┌─ Stream 4 ──────────────┐
+  │ stream_trajectory    │   │ stream_quality       │   │ stream_routing_infra    │
+  │                      │   │                      │   │                         │
+  │ Group by trace_id,   │   │ Build eval context,  │   │ Simulate GPU contention,│
+  │ compute step sequence│   │ call Ollama as judge,│   │ network latency,        │
+  │ & signature hash     │   │ score 5 dimensions   │   │ topology-aware routing  │
+  │                      │   │                      │   │                         │
+  │ Output:              │   │ Output:              │   │ Outputs:                │
+  │ [trajectory_templates]   │ [quality_scores]     │   │ [gpu_metrics]           │
+  └───────────┬──────────┘   └──────────┬───────────┘   │ [network_metrics]       │
+              │                          │               │ [request_routing]       │
+              │                          │               └────────┬────────────────┘
+              │                          │                        │
+              │                          ▼                        │
+              │         ┌─ Stream 5 (stream_correlated) ─────────────────────┐
+              │         │  Joins all tables for final correlated view:       │
+              ├────────▶│  trajectory + quality + routing + gpu + network    │
+              │         │                                                    │
+              │         │  Output: [trace_correlated]                        │
+              │         └──────────────────┬─────────────────────────────────┘
+              │                            │
+              ▼                            ▼
+═══════════════════════════════════════════════════════════════════════════════
+ ANALYTICS API (FastAPI :8002)
+═══════════════════════════════════════════════════════════════════════════════
+
+  Reads: trajectory_templates, quality_scores, trace_correlated,
+         gpu_metrics, network_metrics, request_routing, agent_steps,
+         analytics_windows, topology
+  Serves: /analytics/trajectories, /analytics/quality, /analytics/gpu,
+          /analytics/network, /analytics/correlation/traces,
+          /analytics/correlation/windows, /analytics/routing,
+          /analytics/summary (LLM-powered)
+  Dashboard UI: /analytics
+```
 
 ## Components
 
 | Component | Purpose |
 |-----------|---------|
-| `src/telemetry.py` | OpenTelemetry setup (TracerProvider, MeterProvider, LoggerProvider) |
-| `src/metrics.py` | Custom metrics definitions (counters, histograms, gauges) |
-| `src/llm_client.py` | Ollama client with retry logic and tracing |
-| `src/rag.py` | RAG retrieval with ChromaDB, travel knowledge base |
-| `src/tools.py` | HTTP tool calls + MCP tool client + builtin travel tools |
-| `src/agents.py` | Multi-agent system (Orchestrator, Research, Flight, Hotel, Itinerary) |
-| `src/mcp_server.py` | FastAPI MCP tool server (simulated travel APIs) |
-| `src/main.py` | Application entrypoint and demo workflow |
+| `src/telemetry.py` | OpenTelemetry setup — TracerProvider, MeterProvider, LoggerProvider with OTLP + Pulsar exporters |
+| `src/metrics.py` | Custom OTel metrics: LLM latency/tokens, agent handoffs, RAG retrieval, tool calls, retries, workflow duration |
+| `src/llm_client.py` | Ollama LLM client with retry logic (tenacity) and per-call span instrumentation |
+| `src/rag.py` | RAG retrieval via ChromaDB + sentence-transformers embeddings, traced |
+| `src/tools.py` | Builtin travel tools, HTTP tool client, MCP tool client — all traced |
+| `src/agents.py` | Multi-agent system: Orchestrator, Research, Flight, Hotel, Itinerary agents |
+| `src/chat_server.py` | FastAPI chat server with session persistence (SQLite), intent extraction, multi-turn conversation |
+| `src/mcp_server.py` | FastAPI MCP tool server exposing simulated travel APIs (flights, hotels, weather, visa, currency) |
+| `src/session_store.py` | SQLite-backed session/conversation persistence |
+| `src/pulsar_exporter.py` | Custom OpenTelemetry SpanExporter that writes spans to Apache Pulsar |
+| `src/trace_consumer.py` | Pulsar consumer that reads OTLP spans and writes to Delta Lake (`trace_delta_table`) |
+| `src/streaming_config.py` | Shared config, schemas, Spark session factory, span classification logic for all streaming jobs |
+| `src/stream_agent_steps.py` | Stream 1: raw spans → classified `agent_steps` (Delta MERGE) |
+| `src/stream_trajectory.py` | Stream 2: agent_steps → `trajectory_templates` (trajectory signature extraction) |
+| `src/stream_quality.py` | Stream 3: agent_steps → `quality_scores` (LLM-as-judge evaluation via Ollama) |
+| `src/stream_routing_infra.py` | Stream 4: agent_steps → `gpu_metrics`, `network_metrics`, `request_routing` (simulated infra) |
+| `src/stream_correlated.py` | Stream 5: quality_scores → `trace_correlated` (joins trajectory + quality + infra metrics) |
+| `src/infra_simulator.py` | GPU contention, network latency, and topology-aware request routing simulator |
+| `src/analytics_api.py` | FastAPI analytics server — reads all Delta tables, serves REST API + dashboard UI |
+| `src/main.py` | CLI entrypoint with interactive chat session |
 
-## Quick Start
+## Telemetry Signals Emitted
+
+### Traces (Spans)
+
+| Span Name | Description |
+|-----------|-------------|
+| `agent.orchestrator.plan_trip` | Root span for the entire multi-agent workflow |
+| `agent.research_agent.research_destination` | RAG retrieval + LLM reasoning |
+| `agent.flight_agent.search_flights` | Tool calls + LLM analysis for flights |
+| `agent.hotel_agent.search_hotels` | Hotel search + weather check |
+| `agent.itinerary_agent.create_itinerary` | Final day-by-day synthesis |
+| `chat {model}` | Each Ollama inference call (model, tokens, latency) |
+| `findNearest {collection}` | ChromaDB vector retrieval (query, doc count) |
+| `builtin/{tool_name}` | Builtin tool invocations (search_flights, search_hotels, get_weather, get_visa_info, currency_convert) |
+| `HTTP {METHOD}` | External HTTP calls with OTel semantic conventions |
+| `travel-tools/{tool_name}` | MCP tool server invocations |
+
+All spans carry `session.id` (injected by a custom `SessionIdSpanProcessor`) and standard OTel resource attributes (`service.name`, `service.version`, `deployment.environment`).
+
+### Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `llm.call.duration` | Histogram | LLM inference latency (seconds) |
+| `llm.token.usage` | Counter | Tokens consumed per call |
+| `llm.calls.total` | Counter | Total LLM calls |
+| `llm.errors.total` | Counter | LLM errors by type |
+| `agent.handoffs.total` | Counter | Agent-to-agent handoffs |
+| `agent.active` | UpDownCounter | Currently active agents |
+| `rag.retrieval.duration` | Histogram | Vector search latency |
+| `rag.documents.retrieved` | Histogram | Docs returned per query |
+| `tool.calls.total` | Counter | Tool invocations |
+| `tool.call.duration` | Histogram | Tool call latency |
+| `tool.errors.total` | Counter | Tool call errors |
+| `retry.attempts.total` | Counter | Retry count by operation |
+| `workflow.duration` | Histogram | End-to-end workflow time |
+| `workflow.requests.total` | Counter | Total workflow requests |
+
+### Logs
+
+Structured JSON logs via OpenTelemetry LoggerProvider + `structlog`, automatically correlated with trace/span context.
+
+## Setup Instructions
 
 ### Prerequisites
 
 - Python 3.11+
 - [Ollama](https://ollama.ai/) installed and running
-- Docker (for observability stack)
+- Docker & Docker Compose
+- Java 8+ (required by PySpark)
 
-### 1. Setup
+### 1. Clone & Install
 
 ```bash
-# Clone and enter the project
+git clone <repo-url>
 cd Trajectory-Analytics-Workflow
 
-# Create virtual environment
 python -m venv .venv
 source .venv/bin/activate
-
-# Install dependencies
 pip install -r requirements.txt
-
-# Copy environment config
-cp .env.example .env
 ```
 
 ### 2. Start Ollama
 
 ```bash
-# Pull the model
 ollama pull llama3.2
-
-# Ollama should be serving on localhost:11434
 ollama serve
 ```
 
@@ -91,184 +244,52 @@ ollama serve
 
 ```bash
 docker-compose up -d
-
-# Access UIs:
-# Jaeger UI: http://localhost:16686
-# Prometheus: http://localhost:9090
-# Grafana: http://localhost:3000 (admin/admin)
 ```
 
-### 4. (Optional) Start MCP Tool Server
+This starts:
+- **OTel Collector** — OTLP gRPC (:4317) and HTTP (:4318)
+- **Jaeger** — Trace UI at http://localhost:16686
+- **Prometheus** — Metrics at http://localhost:9090
+- **Grafana** — Dashboards at http://localhost:3000 (admin/admin)
+- **Apache Pulsar** — Streaming backbone at :6650
+
+### 4. Run the Application
+
+Open separate terminals for each process (activate venv in each):
 
 ```bash
-python -m src.mcp_server
-# Runs on http://localhost:8001
-```
-
-### 5. Run the Travel Agent
-
-```bash
-python -m src.main
-```
-
-## What Happens When You Run It
-
-1. **Telemetry initializes** — TracerProvider, MeterProvider, LoggerProvider all connect to the OTel Collector
-2. **RAG seeds** — Travel knowledge base loads into ChromaDB
-3. **HTTP tool demo** — Makes a real HTTP call (traced)
-4. **MCP tool demo** — Attempts to call the MCP server (graceful fallback)
-5. **Trip planning workflow** — Orchestrator coordinates 4 specialist agents:
-   - Research Agent retrieves destination info from RAG + reasons with LLM
-   - Flight Agent searches flights via tools + LLM analysis
-   - Hotel Agent searches accommodations + checks weather
-   - Itinerary Agent synthesizes everything into a day-by-day plan
-6. **Telemetry emitted** — All operations produce traces (spans), metrics, and structured logs
-
-## Observability Features
-
-### Traces (Spans)
-- `agent.orchestrator.plan_trip` — root span for entire workflow
-- `agent.research_agent.research_destination` — RAG + LLM research
-- `agent.flight_agent.search_flights` — flight tool calls + LLM analysis
-- `agent.hotel_agent.search_hotels` — hotel search + weather check
-- `agent.itinerary_agent.create_itinerary` — final synthesis
-- `llm.chat` — each Ollama inference call
-- `rag.retrieve` — vector retrieval operations
-- `tool.builtin.*` — each tool invocation
-- `tool.http_call` — external HTTP calls
-- `tool.mcp_invoke` — MCP protocol calls
-
-### Metrics
-- `llm.call.duration` — histogram of LLM latency
-- `llm.token.usage` — counter of tokens consumed
-- `llm.errors.total` — LLM error count by type
-- `agent.handoffs.total` — inter-agent communication count
-- `rag.retrieval.duration` — vector search latency
-- `rag.documents.retrieved` — docs per query
-- `tool.calls.total` — tool invocation count
-- `tool.call.duration` — tool latency histogram
-- `retry.attempts.total` — retry count by operation
-- `workflow.duration` — end-to-end workflow time
-
-### Logs
-- Structured JSON with trace/span context correlation
-- Agent lifecycle events
-- Error details with stack traces
-- Performance annotations
-
----
-
-## Streaming Analytics Pipeline
-
-Infrastructure-aware agent trajectory & quality observability. Correlates agent behavior, LLM-as-judge quality scores, and simulated GPU contention to identify infrastructure-driven degradation.
-
-### Architecture
-
-```
-trace_consumer (OTLP → Delta)
-       │
-       ▼
-┌─────────────────┐
-│ trace_delta_table│  ← Raw OTLP spans
-└────────┬────────┘
-         │
-         ▼ [Stream 1]
-┌─────────────────┐
-│   agent_steps   │  ← Classified & flattened spans
-└──┬──────┬─────┬─┘
-   │      │     │
-   ▼      ▼     ▼
-[S2]    [S3]   [S4]
-   │      │     │
-   ▼      │     ▼
-┌──────┐  │  ┌────────────────────────────────────┐
-│traj- │  │  │ gpu_metrics + network_metrics +     │
-│ectory│  │  │ request_routing                     │
-└──────┘  │  └────────────────────────────────────┘
-          ▼
-   ┌─────────────┐
-   │quality_scores│  ← LLM-as-judge (Ollama)
-   └──────┬──────┘
-          │
-          ▼ [Stream 5]
-   ┌─────────────────┐
-   │ trace_correlated │  ← Final joined table
-   └─────────────────┘
-          │
-          ▼
-   ┌─────────────┐
-   │analytics_api │  → Dashboard at :8002/analytics
-   └─────────────┘
-```
-
-### Streaming Jobs — Command Reference
-
-| Seq | Command | Source Table | Target Table(s) | Write Mode | Checkpoint |
-|-----|---------|-------------|-----------------|------------|------------|
-| 0 | `ollama serve` | — | — | — | — |
-| 1 | `python -m src.trace_consumer` | OTLP (port 4318) | `trace_delta_table` | Append | — |
-| 2 | `uvicorn src.chat_server:app --port 8000` | — | (generates traces) | — | — |
-| 3 | `python -m src.stream_agent_steps` | `trace_delta_table` | `agent_steps` | Delta MERGE (upsert on trace_id, session_id, span_id) | `data/checkpoints/agent_steps` |
-| 4 | `python -m src.stream_trajectory` | `agent_steps` | `trajectory_templates` | Delta MERGE (upsert on trace_id, session_id) | `data/checkpoints/trajectory` |
-| 5 | `python -m src.stream_quality` | `agent_steps` | `quality_scores` | Delta MERGE (upsert on trace_id, session_id) | `data/checkpoints/quality` |
-| 6 | `python -m src.stream_routing_infra` | `agent_steps` | `gpu_metrics`, `network_metrics`, `request_routing` | Delta MERGE (upsert on timestamp+node+gpu / trace_id+span_id) | `data/checkpoints/routing_infra` |
-| 7 | `python -m src.stream_correlated` | `quality_scores` | `trace_correlated` | Delta MERGE (upsert on trace_id, session_id) | `data/checkpoints/correlated` |
-| 8 | `uvicorn src.analytics_api:app --port 8002` | all Delta tables | — (serves API on :8002) | Read-only | — |
-
-**All streaming jobs (3-7) are independent Spark Structured Streaming processes** with 5-minute trigger intervals. Start them in any order — each will wait for its source table to have data.
-
-### Quick Start (All Terminals)
-
-```bash
-# Activate venv in each terminal
-source .venv/bin/activate
-
-# T1: LLM backend
-ollama serve
-
-# T2: OTLP trace ingestion
+# Terminal 1 — Trace ingestion (Pulsar → Delta Lake)
 python -m src.trace_consumer
 
-# T3: Chat agent (generates traces)
+# Terminal 2 — Chat server (generates traced agent interactions)
 uvicorn src.chat_server:app --reload --port 8000
 
-# T4-T8: Streaming jobs (one per terminal)
+# Terminal 3-7 — Streaming pipeline (Spark Structured Streaming, one each)
 python -m src.stream_agent_steps
 python -m src.stream_trajectory
 python -m src.stream_quality
 python -m src.stream_routing_infra
 python -m src.stream_correlated
 
-# T9: Analytics dashboard
+# Terminal 8 — Analytics dashboard
 uvicorn src.analytics_api:app --port 8002
 ```
 
-### Generate Traces
+### 5. Generate Traces & View Results
 
 ```bash
-curl -X POST http://localhost:8000/chat \
+# Send a chat request
+curl -X POST http://localhost:8000/api/chat \
   -H "Content-Type: application/json" \
   -d '{"message": "Plan a trip to Tokyo for 5 days"}'
-```
 
-### Verify Output
+# View analytics dashboard
+open http://localhost:8002/analytics
 
-```bash
-# Check row counts in all tables
-python -c "
-import deltalake as dl
-for t in ['trace_delta_table','agent_steps','trajectory_templates','quality_scores',
-          'gpu_metrics','network_metrics','request_routing','trace_correlated']:
-    try:
-        print(f'{t}: {dl.DeltaTable(f\"./data/{t}\").to_pyarrow_table().num_rows} rows')
-    except Exception as e:
-        print(f'{t}: ERROR - {e}')
-"
-
-# Or hit the API
-curl http://localhost:8002/api/traces | python -m json.tool
-curl http://localhost:8002/api/quality | python -m json.tool
-curl http://localhost:8002/api/correlation-summary | python -m json.tool
+# Check API endpoints
+curl http://localhost:8002/analytics/trajectories | python -m json.tool
+curl http://localhost:8002/analytics/quality | python -m json.tool
+curl http://localhost:8002/analytics/correlation/traces | python -m json.tool
 ```
 
 ### Reset All Data
@@ -276,5 +297,26 @@ curl http://localhost:8002/api/correlation-summary | python -m json.tool
 ```bash
 rm -rf data/checkpoints data/agent_steps data/trajectory_templates \
        data/quality_scores data/gpu_metrics data/network_metrics \
-       data/request_routing data/trace_correlated
+       data/request_routing data/trace_correlated data/trace_delta_table
 ```
+
+## Dependencies & Credits
+
+| Library | Purpose | License |
+|---------|---------|---------|
+| [OpenTelemetry Python](https://opentelemetry.io/) | Tracing, metrics, logging SDK & OTLP exporters | Apache 2.0 |
+| [Ollama](https://ollama.ai/) + [ollama-python](https://github.com/ollama/ollama-python) | Local LLM inference (llama3.2) | MIT |
+| [ChromaDB](https://www.trychroma.com/) | Vector database for RAG | Apache 2.0 |
+| [sentence-transformers](https://www.sbert.net/) | Embedding model for RAG retrieval | Apache 2.0 |
+| [FastAPI](https://fastapi.tiangolo.com/) | HTTP servers (chat, MCP, analytics) | MIT |
+| [Apache Pulsar](https://pulsar.apache.org/) | Streaming message backbone | Apache 2.0 |
+| [PySpark](https://spark.apache.org/) + [Delta Lake](https://delta.io/) | Structured Streaming & Delta table storage | Apache 2.0 |
+| [Jaeger](https://www.jaegertracing.io/) | Distributed trace backend & UI | Apache 2.0 |
+| [Prometheus](https://prometheus.io/) | Metrics collection & querying | Apache 2.0 |
+| [Grafana](https://grafana.com/) | Metrics dashboards | AGPL 3.0 |
+| [tenacity](https://github.com/jd/tenacity) | Retry logic for LLM calls | Apache 2.0 |
+| [structlog](https://www.structlog.org/) | Structured logging | MIT/Apache 2.0 |
+| [httpx](https://www.python-httpx.org/) / [requests](https://requests.readthedocs.io/) | HTTP clients | BSD / Apache 2.0 |
+| [Pydantic](https://docs.pydantic.dev/) | Data validation | MIT |
+| [PyArrow](https://arrow.apache.org/docs/python/) | Columnar data for Delta Lake | Apache 2.0 |
+| [python-dotenv](https://github.com/theskumar/python-dotenv) | Environment variable loading | BSD |
