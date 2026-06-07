@@ -36,8 +36,15 @@ if ! command -v ollama &>/dev/null; then
   curl -fsSL https://ollama.com/install.sh | sh
 fi
 export OLLAMA_HOST=0.0.0.0:11434
-ollama serve &
-sleep 5
+# Start ollama only if not already running
+if ! curl -sf http://localhost:11434/ >/dev/null 2>&1; then
+  ollama serve &
+  # Wait until ollama is responsive (up to 30s)
+  for i in $(seq 1 30); do
+    curl -sf http://localhost:11434/ >/dev/null 2>&1 && break
+    sleep 1
+  done
+fi
 ollama pull llama3.2
 
 if [ "$ROLE" = "primary" ]; then

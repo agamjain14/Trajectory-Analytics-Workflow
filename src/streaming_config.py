@@ -190,6 +190,7 @@ def create_spark_session(app_name: str) -> SparkSession:
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
         .config("spark.databricks.delta.schema.autoMerge.enabled", "true")
         .config("spark.sql.streaming.schemaInference", "true")
+        .config("spark.submit.deployMode", "client")
         .master("local[*]")
     )
     return configure_spark_with_delta_pip(builder).getOrCreate()
