@@ -58,7 +58,13 @@ echo "  ✓ Docker, Python, Ollama ready"
 # --- Install Python deps ---
 echo ""
 echo "[2/4] Installing Python dependencies..."
-pip install -q -r requirements.txt 2>/dev/null
+
+# Activate venv if available
+if [ -d ".venv" ]; then
+    source .venv/bin/activate
+fi
+
+python3 -m pip install -q -r requirements.txt 2>/dev/null
 
 # --- Start infrastructure (Pulsar + OTel + Jaeger + Prometheus + Grafana) ---
 echo ""
