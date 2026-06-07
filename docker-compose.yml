@@ -6,7 +6,10 @@ version: "3.9"
 services:
   # The main application: Chat + Analytics + Live Metrics
   app:
-    build: .
+    build:
+      context: .
+      args:
+        DEPLOY_MODE: streaming
     ports:
       - "8000:8000"
     environment:
@@ -17,6 +20,7 @@ services:
       - AZURE_OPENAI_API_KEY=${AZURE_OPENAI_API_KEY:-}
       - AZURE_OPENAI_DEPLOYMENT=${AZURE_OPENAI_DEPLOYMENT:-gpt-4o-mini}
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - PULSAR_URL=${PULSAR_URL:-pulsar://pulsar:6650}
       - DATA_DIR=/app/data
     volumes:
       - app-data:/app/data
@@ -90,7 +94,13 @@ services:
       - "6650:6650"   # Pulsar binary protocol
       - "8081:8080"   # Pulsar admin HTTP API (host 8081 to avoid conflict)
     environment:
-      - PULSAR_MEM=-Xms256m -Xmx512m
+      - PULSAR_MEM=-Xms512m -Xmx1g
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+        reservations:
+          memory: 512M
     networks:
       - observability
 

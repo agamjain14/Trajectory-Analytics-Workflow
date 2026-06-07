@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deploy app stack to Azure VM (B2s: 2 vCPU, 4GB RAM, ~$0.012/hr).
+# Deploy app stack to Azure VM (D4s_v7: 4 vCPU, 16GB RAM, ~$0.178/hr).
 # Runs docker-compose: App + Pulsar + OTel + Jaeger + Prometheus + Grafana
 # LLM inference runs on Vast.ai (Ollama). GPU metrics pushed to /ingest/* endpoints.
 #
@@ -16,13 +16,13 @@ set -euo pipefail
 RG="${AZURE_RG:-trajectory-rg}"
 LOCATION="${AZURE_LOCATION:-eastus}"
 VM_NAME="${AZURE_VM:-trajectory-vm}"
-VM_SIZE="${AZURE_VM_SIZE:-Standard_B2s}"
+VM_SIZE="${AZURE_VM_SIZE:-Standard_D4s_v7}"
 ADMIN_USER="azureuser"
 GITHUB_REPO="${GITHUB_REPO:-https://github.com/YOUR_USER/Trajectory-Analytics-Workflow.git}"
 
 echo "============================================"
 echo "  Deploying to Azure VM ($VM_SIZE)"
-echo "  Cost: ~\$0.012/hr (\$8.76/month if 24/7)"
+echo "  Cost: ~\$0.178/hr (\$130/month if 24/7)"
 echo "============================================"
 
 # --- Step 1: Resource Group ---

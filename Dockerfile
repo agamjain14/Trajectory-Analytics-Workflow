@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
        fi \
     && rm -rf /var/lib/apt/lists/*
 
-ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk-arm64
+ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk-${TARGETARCH:-amd64}
 
 # Install core Python dependencies
 COPY requirements.txt .
