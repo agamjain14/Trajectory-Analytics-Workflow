@@ -1,13 +1,14 @@
 """
 LLM Client module.
-Wraps Ollama calls with OpenTelemetry instrumentation and retry logic.
+Supports both Ollama (local/Vast.ai) and Azure OpenAI (serving phase).
+Wraps calls with OpenTelemetry instrumentation and retry logic.
+Set LLM_BACKEND=azure to use Azure OpenAI, otherwise defaults to Ollama.
 """
 
 import os
 import time
 from typing import List, Dict, Any, Optional
 
-import ollama
 from opentelemetry import trace
 from opentelemetry.trace import StatusCode
 from tenacity import (
@@ -21,16 +22,32 @@ from tenacity import (
 from src.telemetry import get_tracer, get_logger
 from src.metrics import AppMetrics
 
+# Backend selection
+LLM_BACKEND = os.getenv("LLM_BACKEND", "ollama")  # "ollama" or "azure"
+
 
 class LLMClient:
-    """Ollama LLM client with OpenTelemetry tracing, metrics, and retry logic."""
+    """LLM client supporting Ollama and Azure OpenAI with OpenTelemetry tracing."""
 
     def __init__(self, app_metrics: AppMetrics):
         self.metrics = app_metrics
-        self.base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-        self.model = os.getenv("OLLAMA_MODEL", "llama3.2")
-        self.client = ollama.Client(host=self.base_url)
+        self.backend = LLM_BACKEND
         self._retry_count = 0
+
+        if self.backend == "azure":
+            from openai import AzureOpenAI
+            self.base_url = os.getenv("AZURE_OPENAI_ENDPOINT", "")
+            self.model = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o-mini")
+            self.client = AzureOpenAI(
+                azure_endpoint=self.base_url,
+                api_key=os.getenv("AZURE_OPENAI_API_KEY", ""),
+                api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-08-01-preview"),
+            )
+        else:
+            import ollama
+            self.base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+            self.model = os.getenv("OLLAMA_MODEL", "llama3.2")
+            self.client = ollama.Client(host=self.base_url)
 
     def _before_retry(self, retry_state):
         """Log retry attempts and record metrics."""
@@ -48,21 +65,36 @@ class LLMClient:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type((ConnectionError, TimeoutError, ollama.ResponseError)),
+        retry=retry_if_exception_type((ConnectionError, TimeoutError, Exception)),
     )
-    def _call_ollama(
+    def _call_llm(
         self,
         messages: List[Dict[str, str]],
         temperature: float = 0.7,
         span: Optional[trace.Span] = None,
     ) -> Dict[str, Any]:
-        """Internal Ollama call with retry logic."""
-        response = self.client.chat(
-            model=self.model,
-            messages=messages,
-            options={"temperature": temperature},
-        )
-        return response
+        """Internal LLM call with retry logic. Supports Ollama and Azure OpenAI."""
+        if self.backend == "azure":
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=temperature,
+            )
+            content = response.choices[0].message.content
+            tokens = response.usage.completion_tokens if response.usage else len(content.split()) * 2
+            input_tokens = response.usage.prompt_tokens if response.usage else 0
+            return {
+                "message": {"content": content},
+                "eval_count": tokens,
+                "prompt_eval_count": input_tokens,
+            }
+        else:
+            response = self.client.chat(
+                model=self.model,
+                messages=messages,
+                options={"temperature": temperature},
+            )
+            return response
 
     def chat(
         self,
@@ -77,7 +109,7 @@ class LLMClient:
         """
         with get_tracer().start_as_current_span(f"chat {self.model}") as span:
             # OTel GenAI Semantic Convention attributes
-            span.set_attribute("gen_ai.system", "ollama")
+            span.set_attribute("gen_ai.system", "azure_openai" if self.backend == "azure" else "ollama")
             span.set_attribute("gen_ai.operation.name", "chat")
             span.set_attribute("gen_ai.request.model", self.model)
             span.set_attribute("gen_ai.request.temperature", temperature)
@@ -91,7 +123,7 @@ class LLMClient:
             start_time = time.time()
 
             try:
-                response = self._call_ollama(messages, temperature, span)
+                response = self._call_llm(messages, temperature, span)
                 duration = time.time() - start_time
 
                 content = response["message"]["content"]
@@ -152,17 +184,25 @@ class LLMClient:
                 raise
 
     def generate_embedding(self, text: str) -> List[float]:
-        """Generate embeddings using Ollama (for custom RAG if needed)."""
+        """Generate embeddings (Ollama native or Azure OpenAI)."""
         with get_tracer().start_as_current_span(f"embeddings {self.model}") as span:
-            span.set_attribute("gen_ai.system", "ollama")
+            span.set_attribute("gen_ai.system", "azure_openai" if self.backend == "azure" else "ollama")
             span.set_attribute("gen_ai.operation.name", "embeddings")
             span.set_attribute("gen_ai.request.model", self.model)
             span.set_attribute("gen_ai.request.input_length", len(text))
 
             try:
-                response = self.client.embeddings(model=self.model, prompt=text)
+                if self.backend == "azure":
+                    embed_model = os.getenv("AZURE_OPENAI_EMBED_DEPLOYMENT", self.model)
+                    response = self.client.embeddings.create(
+                        model=embed_model, input=text
+                    )
+                    embedding = response.data[0].embedding
+                else:
+                    response = self.client.embeddings(model=self.model, prompt=text)
+                    embedding = response["embedding"]
                 span.set_status(StatusCode.OK)
-                return response["embedding"]
+                return embedding
             except Exception as e:
                 span.set_status(StatusCode.ERROR, str(e))
                 span.record_exception(e)

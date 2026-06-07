@@ -166,6 +166,40 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Travel Agent AI Chat", version="1.0.0", lifespan=lifespan)
+
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Mount analytics API endpoints into the same app
+from src.analytics_api import app as analytics_app
+app.mount("/analytics-api", analytics_app)
+
+# Also expose analytics routes at top level for backwards compat
+from src.analytics_api import (
+    get_trajectories, get_trajectory_detail, get_quality_scores,
+    get_quality_detail, get_gpu_metrics, get_network_metrics,
+    get_topology, get_correlated_traces, get_analytics_windows,
+    get_correlation_alerts, get_microstructure, get_routing, get_llm_summary,
+)
+app.get("/analytics/trajectories")(get_trajectories)
+app.get("/analytics/trajectories/{trace_id}")(get_trajectory_detail)
+app.get("/analytics/quality")(get_quality_scores)
+app.get("/analytics/quality/{trace_id}")(get_quality_detail)
+app.get("/analytics/gpu")(get_gpu_metrics)
+app.get("/analytics/network")(get_network_metrics)
+app.get("/analytics/topology")(get_topology)
+app.get("/analytics/correlation/traces")(get_correlated_traces)
+app.get("/analytics/correlation/windows")(get_analytics_windows)
+app.get("/analytics/correlation/alerts")(get_correlation_alerts)
+app.get("/analytics/microstructure")(get_microstructure)
+app.get("/analytics/routing")(get_routing)
+app.get("/analytics/summary")(get_llm_summary)
+
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 

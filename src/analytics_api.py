@@ -11,7 +11,6 @@ import time
 from collections import defaultdict
 from typing import Optional
 
-import ollama
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -27,6 +26,7 @@ logger = logging.getLogger("analytics_api")
 
 # --- Configuration ---
 DATA_DIR = os.getenv("DATA_DIR", "./data")
+LLM_BACKEND = os.getenv("LLM_BACKEND", "ollama")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 SUMMARY_MODEL = os.getenv("SUMMARY_MODEL", "llama3.2")
 
@@ -400,16 +400,34 @@ Traces with highest GPU contention:
 Provide a concise summary:"""
 
     try:
-        client = ollama.Client(host=OLLAMA_BASE_URL)
-        response = client.chat(
-            model=SUMMARY_MODEL,
-            messages=[
-                {"role": "system", "content": "You are a concise observability analyst. Provide brief, actionable summaries."},
-                {"role": "user", "content": prompt},
-            ],
-            options={"temperature": 0.3},
-        )
-        summary_text = response["message"]["content"]
+        if LLM_BACKEND == "azure":
+            from openai import AzureOpenAI
+            client = AzureOpenAI(
+                azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT", ""),
+                api_key=os.getenv("AZURE_OPENAI_API_KEY", ""),
+                api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-08-01-preview"),
+            )
+            response = client.chat.completions.create(
+                model=os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o-mini"),
+                messages=[
+                    {"role": "system", "content": "You are a concise observability analyst. Provide brief, actionable summaries."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.3,
+            )
+            summary_text = response.choices[0].message.content
+        else:
+            import ollama
+            client = ollama.Client(host=OLLAMA_BASE_URL)
+            response = client.chat(
+                model=SUMMARY_MODEL,
+                messages=[
+                    {"role": "system", "content": "You are a concise observability analyst. Provide brief, actionable summaries."},
+                    {"role": "user", "content": prompt},
+                ],
+                options={"temperature": 0.3},
+            )
+            summary_text = response["message"]["content"]
     except Exception as e:
         logger.error(f"LLM summary failed: {e}")
         summary_text = (

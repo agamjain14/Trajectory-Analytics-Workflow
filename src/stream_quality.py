@@ -20,6 +20,8 @@ from delta import DeltaTable
 from src.streaming_config import (
     AGENT_STEPS_PATH, QUALITY_PATH, CHECKPOINT_BASE, TRIGGER_INTERVAL,
     OLLAMA_BASE_URL, EVAL_MODEL, QUALITY_SCHEMA,
+    JUDGE_BACKEND, AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_KEY,
+    AZURE_OPENAI_DEPLOYMENT, AZURE_OPENAI_API_VERSION,
     create_spark_session, ensure_delta_table,
 )
 
@@ -84,18 +86,37 @@ def _extract_trace_context(spans) -> dict:
 
 
 def _call_eval_llm(prompt: str) -> dict:
-    import ollama
+    """Call the judge LLM. Uses Azure OpenAI (stronger) or Ollama (local)."""
     try:
-        client = ollama.Client(host=OLLAMA_BASE_URL)
-        response = client.chat(
-            model=EVAL_MODEL,
-            messages=[
-                {"role": "system", "content": "You are a strict JSON-only evaluator."},
-                {"role": "user", "content": prompt},
-            ],
-            options={"temperature": 0.1},
-        )
-        content = response["message"]["content"]
+        if JUDGE_BACKEND == "azure":
+            from openai import AzureOpenAI
+            client = AzureOpenAI(
+                azure_endpoint=AZURE_OPENAI_ENDPOINT,
+                api_key=AZURE_OPENAI_API_KEY,
+                api_version=AZURE_OPENAI_API_VERSION,
+            )
+            response = client.chat.completions.create(
+                model=AZURE_OPENAI_DEPLOYMENT,
+                messages=[
+                    {"role": "system", "content": "You are a strict JSON-only evaluator. You detect hallucinations by comparing the final response against the evidence and reasoning chain provided."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.1,
+            )
+            content = response.choices[0].message.content
+        else:
+            import ollama
+            client = ollama.Client(host=OLLAMA_BASE_URL)
+            response = client.chat(
+                model=EVAL_MODEL,
+                messages=[
+                    {"role": "system", "content": "You are a strict JSON-only evaluator."},
+                    {"role": "user", "content": prompt},
+                ],
+                options={"temperature": 0.1},
+            )
+            content = response["message"]["content"]
+
         if "```json" in content:
             content = content.split("```json")[1].split("```")[0]
         elif "```" in content:

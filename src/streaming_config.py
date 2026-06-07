@@ -8,7 +8,6 @@ import hashlib
 import json
 import logging
 import os
-import random
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -44,42 +43,24 @@ LOOKBACK_HOURS = int(os.getenv("LOOKBACK_HOURS", "1"))
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 EVAL_MODEL = os.getenv("EVAL_MODEL", "llama3.2")
 
-# --- Simulation ---
-SIM_SEED = int(os.getenv("SIM_SEED", "42"))
+# --- Judge LLM (stronger model for quality evaluation) ---
+JUDGE_BACKEND = os.getenv("JUDGE_BACKEND", "ollama")  # "ollama" or "azure"
+AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "")
+AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY", "")
+AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o-mini")
+AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-08-01-preview")
 
-# --- Topology ---
+# --- Cluster Topology (discovered at runtime from collectors) ---
+NODE_1_URL = os.getenv("NODE_1_URL", "http://localhost:11434")
+NODE_2_URL = os.getenv("NODE_2_URL", "http://localhost:11434")
+NODE_1_ID = os.getenv("NODE_1_ID", "node-1")
+NODE_2_ID = os.getenv("NODE_2_ID", "node-2")
+
 TOPOLOGY = {
-    "cluster": "gpu-cluster-west",
+    "cluster": "gpu-cluster",
     "nodes": [
-        {
-            "id": "node-1",
-            "gpus": [{"id": "gpu-0", "uuid": "GPU-a1b2c3d4", "memory_gb": 24},
-                     {"id": "gpu-1", "uuid": "GPU-e5f6g7h8", "memory_gb": 24}],
-            "nic": {"id": "nic-1", "bandwidth_gbps": 100},
-            "switch_port": "tor-rack-01:port-1",
-        },
-        {
-            "id": "node-2",
-            "gpus": [{"id": "gpu-0", "uuid": "GPU-i9j0k1l2", "memory_gb": 24},
-                     {"id": "gpu-1", "uuid": "GPU-m3n4o5p6", "memory_gb": 24}],
-            "nic": {"id": "nic-2", "bandwidth_gbps": 100},
-            "switch_port": "tor-rack-01:port-2",
-        },
-        {
-            "id": "node-3",
-            "gpus": [{"id": "gpu-0", "uuid": "GPU-q7r8s9t0", "memory_gb": 24},
-                     {"id": "gpu-1", "uuid": "GPU-u1v2w3x4", "memory_gb": 24}],
-            "nic": {"id": "nic-3", "bandwidth_gbps": 100},
-            "switch_port": "tor-rack-01:port-3",
-        },
-    ],
-    "pods": [
-        {"id": "vllm-1", "node": "node-1", "gpu": "gpu-0"},
-        {"id": "vllm-2", "node": "node-1", "gpu": "gpu-1"},
-        {"id": "vllm-3", "node": "node-2", "gpu": "gpu-0"},
-        {"id": "vllm-4", "node": "node-2", "gpu": "gpu-1"},
-        {"id": "vllm-5", "node": "node-3", "gpu": "gpu-0"},
-        {"id": "vllm-6", "node": "node-3", "gpu": "gpu-1"},
+        {"id": NODE_1_ID, "url": NODE_1_URL},
+        {"id": NODE_2_ID, "url": NODE_2_URL},
     ],
 }
 
@@ -138,18 +119,28 @@ QUALITY_SCHEMA = StructType([
 GPU_METRICS_SCHEMA = StructType([
     StructField("timestamp_ms", LongType()), StructField("node_id", StringType()),
     StructField("gpu_id", StringType()), StructField("gpu_uuid", StringType()),
-    StructField("gpu_utilization", DoubleType()), StructField("sm_occupancy", DoubleType()),
-    StructField("memory_used_pct", DoubleType()), StructField("queue_delay_ms", DoubleType()),
-    StructField("power_draw_pct", DoubleType()), StructField("pcie_bandwidth_pct", DoubleType()),
+    StructField("gpu_utilization", DoubleType()),
+    StructField("memory_controller_util", DoubleType()),
+    StructField("memory_used_pct", DoubleType()),
+    StructField("temperature_c", DoubleType()),
+    StructField("power_draw_pct", DoubleType()),
+    StructField("clock_sm_mhz", DoubleType()),
+    StructField("clock_mem_mhz", DoubleType()),
+    StructField("throttle_active", IntegerType()),
+    StructField("pcie_tx_mbps", DoubleType()),
+    StructField("pcie_rx_mbps", DoubleType()),
+    StructField("ecc_errors_total", IntegerType()),
     StructField("contention_index", DoubleType()),
     StructField("ingestion_date", StringType()), StructField("ingestion_hour", IntegerType()),
 ])
 
 NETWORK_METRICS_SCHEMA = StructType([
     StructField("timestamp_ms", LongType()), StructField("node_id", StringType()),
-    StructField("nic_id", StringType()), StructField("switch_port", StringType()),
-    StructField("nic_bandwidth_pct", DoubleType()), StructField("packet_drop_rate", DoubleType()),
-    StructField("switch_port_util", DoubleType()), StructField("latency_us", DoubleType()),
+    StructField("inter_node_latency_us", DoubleType()),
+    StructField("throughput_tx_mbps", DoubleType()),
+    StructField("throughput_rx_mbps", DoubleType()),
+    StructField("packet_drop_count", IntegerType()),
+    StructField("tcp_retransmit_count", IntegerType()),
     StructField("ingestion_date", StringType()), StructField("ingestion_hour", IntegerType()),
 ])
 
@@ -157,7 +148,7 @@ ROUTING_SCHEMA = StructType([
     StructField("trace_id", StringType()), StructField("span_id", StringType()),
     StructField("vllm_pod_id", StringType()), StructField("node_id", StringType()),
     StructField("gpu_id", StringType()), StructField("gpu_uuid", StringType()),
-    StructField("nic_id", StringType()), StructField("switch_port", StringType()),
+    StructField("queue_wait_ms", DoubleType()),
     StructField("timestamp_ms", LongType()),
     StructField("ingestion_date", StringType()), StructField("ingestion_hour", IntegerType()),
 ])
@@ -175,10 +166,15 @@ CORRELATED_SCHEMA = StructType([
     StructField("quality_groundedness", DoubleType()), StructField("quality_relevance", DoubleType()),
     StructField("quality_explanation", StringType()),
     StructField("gpu_contention_avg", DoubleType()), StructField("gpu_contention_max", DoubleType()),
-    StructField("gpu_queue_delay_avg", DoubleType()), StructField("gpu_queue_delay_max", DoubleType()),
+    StructField("gpu_temperature_avg", DoubleType()), StructField("gpu_temperature_max", DoubleType()),
     StructField("gpu_memory_pressure_avg", DoubleType()),
-    StructField("nic_bandwidth_avg", DoubleType()), StructField("nic_bandwidth_max", DoubleType()),
-    StructField("switch_util_avg", DoubleType()), StructField("packet_drop_avg", DoubleType()),
+    StructField("gpu_throttle_count", IntegerType()),
+    StructField("gpu_power_avg", DoubleType()),
+    StructField("inter_node_latency_avg", DoubleType()),
+    StructField("inter_node_latency_max", DoubleType()),
+    StructField("packet_drop_total", IntegerType()),
+    StructField("tcp_retransmit_total", IntegerType()),
+    StructField("queue_wait_avg", DoubleType()), StructField("queue_wait_max", DoubleType()),
     StructField("primary_pod_id", StringType()), StructField("primary_node_id", StringType()),
     StructField("primary_gpu_id", StringType()),
     StructField("ingestion_date", StringType()), StructField("ingestion_hour", IntegerType()),

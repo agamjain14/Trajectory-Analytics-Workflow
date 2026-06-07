@@ -106,28 +106,39 @@ def process_batch(spark: SparkSession, micro_batch_df: DataFrame, batch_id: int)
         routings = routing_by_trace.get(trace_id, [])
 
         gpu_contention_vals = []
-        gpu_queue_vals = []
+        gpu_temp_vals = []
         gpu_mem_vals = []
-        nic_bw_vals = []
-        sw_util_vals = []
+        gpu_power_vals = []
+        gpu_throttle_count = 0
+        latency_vals = []
         pkt_drop_vals = []
+        retransmit_vals = []
+        queue_wait_vals = []
         pod_counts = defaultdict(int)
 
         for r in routings:
             pod_counts[r.vllm_pod_id] += 1
             ts = r.timestamp_ms or traj.start_ts_ms
 
+            # Collect queue wait from routing table
+            if hasattr(r, 'queue_wait_ms') and r.queue_wait_ms:
+                queue_wait_vals.append(r.queue_wait_ms)
+
             for gm in gpu_by_loc.get((r.node_id, r.gpu_id), []):
                 if abs(gm.timestamp_ms - ts) <= 10000:
                     gpu_contention_vals.append(gm.contention_index)
-                    gpu_queue_vals.append(gm.queue_delay_ms)
+                    gpu_temp_vals.append(gm.temperature_c)
                     gpu_mem_vals.append(gm.memory_used_pct)
+                    gpu_power_vals.append(gm.power_draw_pct)
+                    if gm.throttle_active:
+                        gpu_throttle_count += 1
 
             for nm in net_by_node.get(r.node_id, []):
                 if abs(nm.timestamp_ms - ts) <= 10000:
-                    nic_bw_vals.append(nm.nic_bandwidth_pct)
-                    sw_util_vals.append(nm.switch_port_util)
-                    pkt_drop_vals.append(nm.packet_drop_rate)
+                    if nm.inter_node_latency_us and nm.inter_node_latency_us > 0:
+                        latency_vals.append(nm.inter_node_latency_us)
+                    pkt_drop_vals.append(nm.packet_drop_count or 0)
+                    retransmit_vals.append(nm.tcp_retransmit_count or 0)
 
         primary_pod = max(pod_counts, key=pod_counts.get) if pod_counts else ""
         primary_node = ""
@@ -160,13 +171,17 @@ def process_batch(spark: SparkSession, micro_batch_df: DataFrame, batch_id: int)
             "quality_explanation": qual.explanation if qual else "",
             "gpu_contention_avg": round(sum(gpu_contention_vals) / max(len(gpu_contention_vals), 1), 4),
             "gpu_contention_max": round(max(gpu_contention_vals) if gpu_contention_vals else 0.0, 4),
-            "gpu_queue_delay_avg": round(sum(gpu_queue_vals) / max(len(gpu_queue_vals), 1), 2),
-            "gpu_queue_delay_max": round(max(gpu_queue_vals) if gpu_queue_vals else 0.0, 2),
+            "gpu_temperature_avg": round(sum(gpu_temp_vals) / max(len(gpu_temp_vals), 1), 2),
+            "gpu_temperature_max": round(max(gpu_temp_vals) if gpu_temp_vals else 0.0, 2),
             "gpu_memory_pressure_avg": round(sum(gpu_mem_vals) / max(len(gpu_mem_vals), 1), 2),
-            "nic_bandwidth_avg": round(sum(nic_bw_vals) / max(len(nic_bw_vals), 1), 2),
-            "nic_bandwidth_max": round(max(nic_bw_vals) if nic_bw_vals else 0.0, 2),
-            "switch_util_avg": round(sum(sw_util_vals) / max(len(sw_util_vals), 1), 2),
-            "packet_drop_avg": round(sum(pkt_drop_vals) / max(len(pkt_drop_vals), 1), 6),
+            "gpu_throttle_count": gpu_throttle_count,
+            "gpu_power_avg": round(sum(gpu_power_vals) / max(len(gpu_power_vals), 1), 2),
+            "inter_node_latency_avg": round(sum(latency_vals) / max(len(latency_vals), 1), 2),
+            "inter_node_latency_max": round(max(latency_vals) if latency_vals else 0.0, 2),
+            "packet_drop_total": sum(pkt_drop_vals),
+            "tcp_retransmit_total": sum(retransmit_vals),
+            "queue_wait_avg": round(sum(queue_wait_vals) / max(len(queue_wait_vals), 1), 2),
+            "queue_wait_max": round(max(queue_wait_vals) if queue_wait_vals else 0.0, 2),
             "primary_pod_id": primary_pod,
             "primary_node_id": primary_node,
             "primary_gpu_id": primary_gpu,

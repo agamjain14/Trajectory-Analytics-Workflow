@@ -1,0 +1,11 @@
+.git
+__pycache__
+*.pyc
+*.pyo
+.env
+.venv
+venv
+glp-design-workflow/
+data/checkpoints/
+data/chroma_db/
+*.parquet.crc

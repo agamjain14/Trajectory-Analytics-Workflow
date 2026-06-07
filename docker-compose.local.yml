@@ -1,0 +1,161 @@
+# Turnkey Local Deployment - ONE COMMAND to run everything
+# Usage: docker compose -f docker-compose.local.yml up
+#
+# This spins up:
+#   - Ollama (LLM inference on CPU/GPU)
+#   - Travel Agent Chat Server (FastAPI)
+#   - Analytics API + Dashboard
+#   - OTel Collector → Jaeger (tracing)
+#   - Prometheus + Grafana (metrics)
+#   - Apache Pulsar (streaming backbone)
+#
+# After startup, visit:
+#   - Chat:       http://localhost:8000/static/index.html
+#   - Analytics:  http://localhost:8000/static/analytics.html
+#   - Jaeger UI:  http://localhost:16686
+#   - Grafana:    http://localhost:3000
+#   - API Docs:   http://localhost:8000/docs
+
+version: "3.9"
+
+services:
+  # --- LLM Engine ---
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    deploy:
+      resources:
+        reservations:
+          memory: 4G
+    networks:
+      - app
+
+  # Pull the model on first run
+  ollama-init:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: ["sh", "-c", "ollama pull llama3.2 && echo 'Model ready'"]
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    networks:
+      - app
+
+  # --- Application (Chat + Analytics + Streaming) ---
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - LLM_BACKEND=ollama
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - OLLAMA_MODEL=llama3.2
+      - SUMMARY_MODEL=llama3.2
+      - EVAL_MODEL=llama3.2
+      - JUDGE_BACKEND=ollama
+      - DATA_DIR=/app/data
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_SERVICE_NAME=trajectory-analytics
+    depends_on:
+      ollama-init:
+        condition: service_completed_successfully
+      otel-collector:
+        condition: service_started
+      pulsar:
+        condition: service_started
+    volumes:
+      - app-data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/docs"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - app
+      - observability
+
+  # --- Observability Stack ---
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+      - "8889:8889"
+    depends_on:
+      - jaeger
+    networks:
+      - app
+      - observability
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686"
+      - "14268:14268"
+      - "14250:14250"
+    networks:
+      - observability
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+    networks:
+      - observability
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+      - jaeger
+    networks:
+      - observability
+
+  # --- Streaming Backbone ---
+  pulsar:
+    image: apachepulsar/pulsar:3.3.0
+    command: bin/pulsar standalone
+    ports:
+      - "6650:6650"
+      - "8081:8080"
+    environment:
+      - PULSAR_MEM=-Xms256m -Xmx512m
+    networks:
+      - app
+      - observability
+
+networks:
+  app:
+    driver: bridge
+  observability:
+    driver: bridge
+
+volumes:
+  ollama-models:
+  app-data:
+  grafana-data:
