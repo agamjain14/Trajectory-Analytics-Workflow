@@ -351,18 +351,38 @@ def _run_correlation():
         start_ts = min(s.get("start_ts_ms", 0) or 0 for s in trace_steps)
         end_ts = max(s.get("end_ts_ms", 0) or 0 for s in trace_steps)
 
+        # Count span types
+        llm_calls = sum(1 for s in trace_steps if s.get("span_kind") == "REASON")
+        tool_calls = sum(1 for s in trace_steps if s.get("span_kind") == "TOOL")
+        retrieve_calls = sum(1 for s in trace_steps if s.get("span_kind") == "RETRIEVE")
+
+        ingestion_time = datetime.now(timezone.utc)
+
         correlated_rows.append({
             "trace_id": trace_id,
             "session_id": trace_steps[0].get("session_id", ""),
-            "step_count": step_count,
             "start_ts_ms": start_ts,
             "end_ts_ms": end_ts,
-            "total_duration_ms": end_ts - start_ts if end_ts and start_ts else 0,
-            "quality_overall": 0.0,  # filled by quality job
+            "total_duration_ms": float(end_ts - start_ts) if end_ts and start_ts else 0.0,
+            "trajectory_signature": "",
+            "step_sequence": "",
+            "step_count": step_count,
+            "llm_call_count": llm_calls,
+            "tool_call_count": tool_calls,
+            "retrieve_count": retrieve_calls,
+            "retry_count": 0,
+            "quality_overall": 0.0,
+            "quality_completeness": 0.0,
+            "quality_coherence": 0.0,
             "quality_hallucination": 0.0,
+            "quality_groundedness": 0.0,
+            "quality_relevance": 0.0,
+            "quality_explanation": "",
             "gpu_contention_avg": round(avg_contention, 4),
+            "gpu_contention_max": round(avg_contention, 4),
             "gpu_temperature_avg": round(avg_temp, 1),
             "gpu_temperature_max": round(max_temp, 1),
+            "gpu_memory_pressure_avg": 0.0,
             "gpu_throttle_count": sum(1 for r in recent_gpu if r.get("throttle_active", 0)),
             "gpu_power_avg": sum(r.get("power_draw_pct", 0) for r in recent_gpu) / max(len(recent_gpu), 1),
             "inter_node_latency_avg": 0.0,
@@ -371,7 +391,11 @@ def _run_correlation():
             "tcp_retransmit_total": 0,
             "queue_wait_avg": 0.0,
             "queue_wait_max": 0.0,
-            "correlation_flag": "normal",
+            "primary_pod_id": "",
+            "primary_node_id": trace_steps[0].get("node_id", "local"),
+            "primary_gpu_id": "",
+            "ingestion_date": ingestion_time.strftime("%Y-%m-%d"),
+            "ingestion_hour": ingestion_time.hour,
         })
 
     if not correlated_rows:
@@ -381,15 +405,28 @@ def _run_correlation():
     schema = pa.schema([
         ("trace_id", pa.string()),
         ("session_id", pa.string()),
-        ("step_count", pa.int32()),
         ("start_ts_ms", pa.int64()),
         ("end_ts_ms", pa.int64()),
-        ("total_duration_ms", pa.int64()),
+        ("total_duration_ms", pa.float64()),
+        ("trajectory_signature", pa.string()),
+        ("step_sequence", pa.string()),
+        ("step_count", pa.int32()),
+        ("llm_call_count", pa.int32()),
+        ("tool_call_count", pa.int32()),
+        ("retrieve_count", pa.int32()),
+        ("retry_count", pa.int32()),
         ("quality_overall", pa.float64()),
+        ("quality_completeness", pa.float64()),
+        ("quality_coherence", pa.float64()),
         ("quality_hallucination", pa.float64()),
+        ("quality_groundedness", pa.float64()),
+        ("quality_relevance", pa.float64()),
+        ("quality_explanation", pa.string()),
         ("gpu_contention_avg", pa.float64()),
+        ("gpu_contention_max", pa.float64()),
         ("gpu_temperature_avg", pa.float64()),
         ("gpu_temperature_max", pa.float64()),
+        ("gpu_memory_pressure_avg", pa.float64()),
         ("gpu_throttle_count", pa.int32()),
         ("gpu_power_avg", pa.float64()),
         ("inter_node_latency_avg", pa.float64()),
@@ -398,7 +435,11 @@ def _run_correlation():
         ("tcp_retransmit_total", pa.int32()),
         ("queue_wait_avg", pa.float64()),
         ("queue_wait_max", pa.float64()),
-        ("correlation_flag", pa.string()),
+        ("primary_pod_id", pa.string()),
+        ("primary_node_id", pa.string()),
+        ("primary_gpu_id", pa.string()),
+        ("ingestion_date", pa.string()),
+        ("ingestion_hour", pa.int32()),
     ])
     _ensure_delta(CORRELATED_PATH, schema)
     arrays = {f.name: pa.array([r.get(f.name) for r in correlated_rows], type=f.type) for f in schema}
