@@ -20,6 +20,8 @@ GITHUB_REPO="${GITHUB_REPO:-https://github.com/YOUR_USER/Trajectory-Analytics-Wo
 echo "==> Setting up $ROLE node: $NODE_ID"
 
 # --- Common setup ---
+# Purge broken azcmagent left from previous runs (no systemd = broken postinst)
+dpkg --remove --force-remove-reinstreq azcmagent 2>/dev/null || true
 apt-get update && apt-get install -y python3-pip python3-venv iputils-ping git curl wget
 
 if [ ! -d /workspace/trajectory ]; then
