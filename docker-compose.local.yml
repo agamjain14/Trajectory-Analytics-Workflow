@@ -62,6 +62,7 @@ services:
       - LLM_BACKEND=ollama
       - OLLAMA_BASE_URL=http://ollama:11434
       - OLLAMA_MODEL=llama3.2:1b
+      - INTENT_MODEL=llama3.2
       - SUMMARY_MODEL=llama3.2:1b
       - EVAL_MODEL=llama3.2:1b
       - JUDGE_BACKEND=ollama

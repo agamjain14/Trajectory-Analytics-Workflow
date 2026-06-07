@@ -7,6 +7,7 @@ Fully instrumented end-to-end.
 
 import asyncio
 import json
+import os
 import time
 from typing import Optional
 from contextlib import asynccontextmanager
@@ -228,6 +229,10 @@ class NewSessionRequest(BaseModel):
 
 # --- Intent Parsing ---
 
+# Use the smarter model for intent parsing (JSON extraction needs accuracy)
+INTENT_MODEL = os.getenv("INTENT_MODEL", "llama3.2")
+
+
 def extract_info_from_message(message: str, existing_context: dict) -> dict:
     """Use LLM to extract travel parameters and intent from user message."""
     prompt = EXTRACT_INTENT_PROMPT.format(
@@ -239,7 +244,7 @@ def extract_info_from_message(message: str, existing_context: dict) -> dict:
         {"role": "user", "content": prompt},
     ]
 
-    response = llm_client.chat(messages, agent_name="intent_parser", temperature=0.1)
+    response = llm_client.chat(messages, agent_name="intent_parser", temperature=0.1, model_override=INTENT_MODEL)
     content = response["content"].strip()
 
     # Parse JSON from response

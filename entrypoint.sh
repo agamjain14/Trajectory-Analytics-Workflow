@@ -12,6 +12,8 @@ case "$MODE" in
     # Local mode: run chat server (includes analytics endpoints)
     echo "==> Starting MCP Tool Server on port 8001..."
     python3 -m src.mcp_server &
+    echo "==> Starting Trace Consumer (Pulsar → Delta Lake)..."
+    python3 -m src.trace_consumer &
     sleep 1
     echo "==> Starting Chat Server + Analytics API (local mode)"
     exec uvicorn src.chat_server:app --host 0.0.0.0 --port "$PORT"

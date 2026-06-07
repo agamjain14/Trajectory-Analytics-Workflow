@@ -96,11 +96,13 @@ class LLMClient:
         messages: List[Dict[str, str]],
         temperature: float = 0.7,
         span: Optional[trace.Span] = None,
+        model_override: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Internal LLM call with retry logic. Supports Ollama and Azure OpenAI."""
+        use_model = model_override or self.model
         if self.backend == "azure":
             response = self.client.chat.completions.create(
-                model=self.model,
+                model=use_model,
                 messages=messages,
                 temperature=temperature,
             )
@@ -116,7 +118,7 @@ class LLMClient:
         else:
             client, node_url = self._next_ollama_client()
             response = client.chat(
-                model=self.model,
+                model=use_model,
                 messages=messages,
                 options={"temperature": temperature, "num_predict": 512},
             )
@@ -128,17 +130,19 @@ class LLMClient:
         messages: List[Dict[str, str]],
         agent_name: str = "default",
         temperature: float = 0.7,
+        model_override: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Send a chat completion request to Ollama with full tracing.
         
         Returns dict with 'content', 'model', 'tokens', 'duration_ms'.
         """
-        with get_tracer().start_as_current_span(f"chat {self.model}") as span:
+        use_model = model_override or self.model
+        with get_tracer().start_as_current_span(f"chat {use_model}") as span:
             # OTel GenAI Semantic Convention attributes
             span.set_attribute("gen_ai.system", "azure_openai" if self.backend == "azure" else "ollama")
             span.set_attribute("gen_ai.operation.name", "chat")
-            span.set_attribute("gen_ai.request.model", self.model)
+            span.set_attribute("gen_ai.request.model", use_model)
             span.set_attribute("gen_ai.request.temperature", temperature)
             span.set_attribute("gen_ai.request.max_tokens", 0)  # Ollama default: unlimited
             # Custom attributes (no standard equivalent)
@@ -150,14 +154,14 @@ class LLMClient:
             start_time = time.time()
 
             try:
-                response = self._call_llm(messages, temperature, span)
+                response = self._call_llm(messages, temperature, span, model_override=model_override)
                 duration = time.time() - start_time
 
                 content = response["message"]["content"]
                 # Estimate token count (Ollama provides eval_count)
                 tokens = response.get("eval_count", len(content.split()) * 2)
 
-                span.set_attribute("gen_ai.response.model", self.model)
+                span.set_attribute("gen_ai.response.model", use_model)
                 span.set_attribute("gen_ai.response.node_url", response.get("_node_url", self.base_url))
                 span.set_attribute("gen_ai.usage.output_tokens", tokens)
                 span.set_attribute("gen_ai.usage.input_tokens", response.get("prompt_eval_count", len(str(messages)) // 4))
