@@ -28,22 +28,25 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup SSH key
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Add host keys
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -p ${{ inputs.node2_ssh_port }} ${{ inputs.node2_ip }} >> ~/.ssh/known_hosts 2>/dev/null || true
 
       - name: Copy code to Node 2
         run: |
           rsync -avz --exclude='.git' --exclude='data/' --exclude='.venv' --exclude='__pycache__' \
-            -e "ssh -p ${{ inputs.node2_ssh_port }} -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no" \
+            -e "ssh -p ${{ inputs.node2_ssh_port }} -o StrictHostKeyChecking=no" \
             ./ root@${{ inputs.node2_ip }}:/workspace/trajectory/
 
       - name: Setup Node 2
         run: |
-          ssh -p ${{ inputs.node2_ssh_port }} -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+          ssh -p ${{ inputs.node2_ssh_port }} -o StrictHostKeyChecking=no \
             root@${{ inputs.node2_ip }} bash -s <<'REMOTE'
           set -euo pipefail
           cd /workspace/trajectory
@@ -62,7 +65,7 @@ jobs:
 
       - name: Verify Node 2
         run: |
-          ssh -p ${{ inputs.node2_ssh_port }} -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+          ssh -p ${{ inputs.node2_ssh_port }} -o StrictHostKeyChecking=no \
             root@${{ inputs.node2_ip }} "curl -s http://localhost:11434/api/tags | head -c 200"
 
   deploy-node1:
@@ -73,22 +76,25 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup SSH key
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Add host keys
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -p ${{ inputs.node1_ssh_port }} ${{ inputs.node1_ip }} >> ~/.ssh/known_hosts 2>/dev/null || true
 
       - name: Copy code to Node 1
         run: |
           rsync -avz --exclude='.git' --exclude='data/' --exclude='.venv' --exclude='__pycache__' \
-            -e "ssh -p ${{ inputs.node1_ssh_port }} -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no" \
+            -e "ssh -p ${{ inputs.node1_ssh_port }} -o StrictHostKeyChecking=no" \
             ./ root@${{ inputs.node1_ip }}:/workspace/trajectory/
 
       - name: Setup Node 1
         run: |
-          ssh -p ${{ inputs.node1_ssh_port }} -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+          ssh -p ${{ inputs.node1_ssh_port }} -o StrictHostKeyChecking=no \
             root@${{ inputs.node1_ip }} bash -s <<'REMOTE'
           set -euo pipefail
           cd /workspace/trajectory
@@ -108,7 +114,7 @@ jobs:
       - name: Verify cluster
         run: |
           sleep 10
-          ssh -p ${{ inputs.node1_ssh_port }} -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+          ssh -p ${{ inputs.node1_ssh_port }} -o StrictHostKeyChecking=no \
             root@${{ inputs.node1_ip }} bash -s <<'VERIFY'
           echo "=== App status ==="
           curl -s http://localhost:8000/ingest/status || echo "App not ready yet"
@@ -145,20 +151,19 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch' && false
     steps:
-      - name: Setup SSH key
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
       - name: Stop Node 1
         run: |
-          ssh -p ${{ inputs.node1_ssh_port }} -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+          ssh -p ${{ inputs.node1_ssh_port }} -o StrictHostKeyChecking=no \
             root@${{ inputs.node1_ip }} \
             "pkill -f uvicorn; pkill -f gpu_collector; pkill -f network_collector; pkill -f stream_; docker compose -f /workspace/trajectory/docker-compose.yml down 2>/dev/null; echo done" || true
 
       - name: Stop Node 2
         run: |
-          ssh -p ${{ inputs.node2_ssh_port }} -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+          ssh -p ${{ inputs.node2_ssh_port }} -o StrictHostKeyChecking=no \
             root@${{ inputs.node2_ip }} \
             "pkill -f gpu_collector; pkill -f network_collector; pkill ollama; echo done" || true

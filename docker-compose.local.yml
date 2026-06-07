@@ -68,6 +68,7 @@ services:
       - DATA_DIR=/app/data
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
       - OTEL_SERVICE_NAME=trajectory-analytics
+      - PULSAR_URL=pulsar://pulsar:6650
     depends_on:
       ollama-init:
         condition: service_completed_successfully
