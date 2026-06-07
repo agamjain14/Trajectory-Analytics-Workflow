@@ -8,6 +8,7 @@ import time
 import json
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from opentelemetry import trace
 from opentelemetry.trace import StatusCode
@@ -420,34 +421,38 @@ class OrchestratorAgent(BaseAgent):
             workflow_start = time.time()
 
             try:
-                # Step 1: Research destination
-                get_logger().info("orchestrator.step", step="research", destination=destination)
-                self.metrics.record_agent_handoff(self.name, "research_agent")
-                research_result = self.research_agent.research_destination(
-                    destination, interests
-                )
-
-                # Step 2: Search flights
-                get_logger().info("orchestrator.step", step="flights", origin=origin, destination=destination)
-                self.metrics.record_agent_handoff(self.name, "flight_agent")
-                flight_result = self.flight_agent.search_flights(
-                    origin, destination, departure_date, passengers
-                )
-
-                # Step 3: Search hotels
-                get_logger().info("orchestrator.step", step="hotels", city=destination)
-                self.metrics.record_agent_handoff(self.name, "hotel_agent")
-                hotel_result = self.hotel_agent.search_hotels(
-                    destination, departure_date, return_date, passengers, budget
-                )
-
-                # Step 4: Create itinerary
-                # Calculate duration
+                # Steps 1-3: Run research, flights, and hotels IN PARALLEL
+                # These are independent — no reason to wait sequentially.
                 from datetime import datetime
                 dep = datetime.strptime(departure_date, "%Y-%m-%d")
                 ret = datetime.strptime(return_date, "%Y-%m-%d")
                 duration_days = (ret - dep).days
 
+                def _research():
+                    get_logger().info("orchestrator.step", step="research", destination=destination)
+                    self.metrics.record_agent_handoff(self.name, "research_agent")
+                    return self.research_agent.research_destination(destination, interests)
+
+                def _flights():
+                    get_logger().info("orchestrator.step", step="flights", origin=origin, destination=destination)
+                    self.metrics.record_agent_handoff(self.name, "flight_agent")
+                    return self.flight_agent.search_flights(origin, destination, departure_date, passengers)
+
+                def _hotels():
+                    get_logger().info("orchestrator.step", step="hotels", city=destination)
+                    self.metrics.record_agent_handoff(self.name, "hotel_agent")
+                    return self.hotel_agent.search_hotels(destination, departure_date, return_date, passengers, budget)
+
+                with ThreadPoolExecutor(max_workers=3) as executor:
+                    future_research = executor.submit(_research)
+                    future_flights = executor.submit(_flights)
+                    future_hotels = executor.submit(_hotels)
+
+                    research_result = future_research.result()
+                    flight_result = future_flights.result()
+                    hotel_result = future_hotels.result()
+
+                # Step 4: Create itinerary (depends on the above results)
                 get_logger().info("orchestrator.step", step="itinerary", days=duration_days)
                 self.metrics.record_agent_handoff(self.name, "itinerary_agent")
                 itinerary_result = self.itinerary_agent.create_itinerary(

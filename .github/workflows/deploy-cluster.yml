@@ -55,10 +55,6 @@ jobs:
           export NODE_ID=node-2
           export PEER_IP=${{ inputs.node1_ip }}
           export INGEST_URL=http://${{ inputs.node1_ip }}:8000
-          export AZURE_TENANT_ID=${{ secrets.AZURE_TENANT_ID }}
-          export AZURE_SUBSCRIPTION_ID=${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          export AZURE_CLIENT_ID=${{ secrets.AZURE_CLIENT_ID }}
-          export AZURE_CLIENT_SECRET=${{ secrets.AZURE_CLIENT_SECRET }}
 
           bash deploy/vastai_setup.sh
           REMOTE
@@ -103,10 +99,6 @@ jobs:
           export NODE_ID=node-1
           export PEER_IP=${{ inputs.node2_ip }}
           export NODE_2_IP=${{ inputs.node2_ip }}
-          export AZURE_TENANT_ID=${{ secrets.AZURE_TENANT_ID }}
-          export AZURE_SUBSCRIPTION_ID=${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          export AZURE_CLIENT_ID=${{ secrets.AZURE_CLIENT_ID }}
-          export AZURE_CLIENT_SECRET=${{ secrets.AZURE_CLIENT_SECRET }}
 
           bash deploy/vastai_setup.sh
           REMOTE

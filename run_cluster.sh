@@ -4,7 +4,6 @@
 # Architecture:
 #   Node 1 (primary): App + Observability + Streaming + Ollama + Collectors
 #   Node 2 (collector): Ollama + Collectors (pushes metrics to Node 1)
-#   Both nodes registered with Azure Arc
 #
 # Usage:
 #   bash run_cluster.sh
@@ -49,8 +48,7 @@ export NODE_ID=node-2
 export PEER_IP=$NODE1_IP
 export INGEST_URL=http://$NODE1_IP:8000
 export GITHUB_REPO=$GITHUB_REPO
-export AZURE_TENANT_ID=\"${AZURE_TENANT_ID:-}\"
-export AZURE_SUBSCRIPTION_ID=\"${AZURE_SUBSCRIPTION_ID:-}\"
+
 bash /tmp/vastai_setup.sh
 '"
 echo "  ✓ Node 2 ready"
@@ -63,8 +61,7 @@ export NODE_ID=node-1
 export PEER_IP=$NODE2_IP
 export NODE_2_IP=$NODE2_IP
 export GITHUB_REPO=$GITHUB_REPO
-export AZURE_TENANT_ID=\"${AZURE_TENANT_ID:-}\"
-export AZURE_SUBSCRIPTION_ID=\"${AZURE_SUBSCRIPTION_ID:-}\"
+
 bash /tmp/vastai_setup.sh
 '"
 echo "  ✓ Node 1 ready"

@@ -2,7 +2,7 @@
 
 ## Why This Architecture
 
-This project needs **real GPU metrics** (NVML: utilization, temperature, power, PCIe throughput) and **real network metrics** (psutil: latency, throughput, retransmits). Azure OpenAI is a managed API — no hardware access, no metrics. So inference runs on Vast.ai with Ollama, and Azure Arc registers the nodes as Azure-managed servers to satisfy the Microsoft stack requirement.
+This project needs **real GPU metrics** (NVML: utilization, temperature, power, PCIe throughput) and **real network metrics** (psutil: latency, throughput, retransmits). Azure OpenAI is a managed API — no hardware access, no metrics. So inference runs on Vast.ai with Ollama, giving direct GPU access for real telemetry.
 
 ## Cluster Layout
 
@@ -11,13 +11,12 @@ Node 1 (142.126.17.171)                    Node 2 (174.116.164.194)
 ├── Ollama (LLM inference)                  ├── Ollama (LLM inference)
 ├── gpu_collector.py (NVML → push)          ├── gpu_collector.py (NVML → push)
 ├── network_collector.py (psutil → push)    ├── network_collector.py (psutil → push)
-├── App (FastAPI: chat, analytics, UI)      └── Azure Arc agent
+├── App (FastAPI: chat, analytics, UI)      └── qwen2.5:7b (judge model)
 ├── OTel Collector → Jaeger
 ├── Prometheus + Grafana
 ├── Apache Pulsar
 ├── Spark streaming jobs (local[*])
-├── Delta Lake tables (./data/)
-└── Azure Arc agent
+└── Delta Lake tables (./data/)
 ```
 
 Node 1 runs everything (app + observability + streaming + LLM).
@@ -178,26 +177,7 @@ nohup python3 -m src.network_collector > /tmp/net_collector.log 2>&1 &
 
 ---
 
-## Step 3: Azure Arc Registration (both nodes)
-
-Run on **each node**:
-
-```bash
-wget -q https://aka.ms/azcmagent -O /tmp/install_linux_azcmagent.sh
-bash /tmp/install_linux_azcmagent.sh
-
-azcmagent connect \
-  --resource-group "trajectory-rg" \
-  --location "eastus" \
-  --tenant-id "<YOUR_TENANT_ID>" \
-  --subscription-id "<YOUR_SUBSCRIPTION_ID>"
-```
-
-After this, both nodes appear in Azure Portal → Azure Arc → Servers.
-
----
-
-## Step 4: Verify
+## Step 3: Verify
 
 From your local machine:
 
@@ -264,7 +244,6 @@ Then stop the Vast.ai instances from the dashboard to stop billing.
 
 | Component | Cost |
 |-----------|------|
-| Azure Arc agent (both nodes) | Free |
 | Vast.ai Node 1 | ~$0.071/hr |
 | Vast.ai Node 2 | ~$0.065/hr |
 | **Both nodes running 8 hrs** | **~$1.09** |

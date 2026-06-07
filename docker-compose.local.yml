@@ -45,7 +45,7 @@ services:
     depends_on:
       ollama:
         condition: service_healthy
-    entrypoint: ["sh", "-c", "ollama pull llama3.2 && echo 'Model ready'"]
+    entrypoint: ["sh", "-c", "ollama pull llama3.2:1b && echo 'Model ready'"]
     environment:
       - OLLAMA_HOST=ollama:11434
     networks:
@@ -61,9 +61,9 @@ services:
     environment:
       - LLM_BACKEND=ollama
       - OLLAMA_BASE_URL=http://ollama:11434
-      - OLLAMA_MODEL=llama3.2
-      - SUMMARY_MODEL=llama3.2
-      - EVAL_MODEL=llama3.2
+      - OLLAMA_MODEL=llama3.2:1b
+      - SUMMARY_MODEL=llama3.2:1b
+      - EVAL_MODEL=llama3.2:1b
       - JUDGE_BACKEND=ollama
       - DATA_DIR=/app/data
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
@@ -78,6 +78,7 @@ services:
         condition: service_started
     volumes:
       - app-data:/app/data
+      - chroma-cache:/root/.cache/chroma
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/docs"]
       interval: 10s
@@ -161,3 +162,4 @@ volumes:
   ollama-models:
   app-data:
   grafana-data:
+  chroma-cache:

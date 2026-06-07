@@ -242,7 +242,7 @@ Stop: `make down`
 
 ### Option B: Live GPU Cluster (2-node Vast.ai)
 
-Deploys across 2 Vast.ai GPU nodes with real GPU/network metrics, round-robin LLM inference, and Azure Arc registration.
+Deploys across 2 Vast.ai GPU nodes with real GPU/network metrics and round-robin LLM inference.
 
 **Prerequisites:** 2 Vast.ai GPU instances running, SSH key added to both.
 

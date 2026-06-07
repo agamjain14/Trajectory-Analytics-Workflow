@@ -10,8 +10,6 @@
 # Usage (collector node):
 #   ROLE=collector NODE_ID=node-2 INGEST_URL=http://<node1-ip>:8000 PEER_IP=<node1-ip> bash deploy/vastai_setup.sh
 #
-# Optional (Azure Arc):
-#   AZURE_TENANT_ID=<tenant> AZURE_SUBSCRIPTION_ID=<sub>
 set -euo pipefail
 
 ROLE="${ROLE:-collector}"
@@ -121,41 +119,6 @@ else
   echo "==> Collector node ready!"
   echo "  Pushing metrics to: $INGEST_URL"
   echo "  Ollama serving on:  0.0.0.0:11434"
-fi
-
-# --- Azure Arc (optional, requires systemd — skipped on containers) ---
-if [ -n "${AZURE_TENANT_ID:-}" ] && [ -n "${AZURE_SUBSCRIPTION_ID:-}" ]; then
-  # Check if systemd is available (Arc requires it)
-  if pidof systemd >/dev/null 2>&1 || [ -d /run/systemd/system ]; then
-    echo "==> Installing Azure Arc agent..."
-    wget -q https://aka.ms/azcmagent -O /tmp/install_linux_azcmagent.sh
-    bash /tmp/install_linux_azcmagent.sh || { echo "  ⚠ Arc install failed (expected on containers). Skipping."; }
-
-    if command -v azcmagent &>/dev/null; then
-      if [ -n "${AZURE_CLIENT_ID:-}" ] && [ -n "${AZURE_CLIENT_SECRET:-}" ]; then
-        echo "==> Registering with Azure Arc (service principal)..."
-        azcmagent connect \
-          --resource-group "${AZURE_RG:-trajectory-rg}" \
-          --location "${AZURE_LOCATION:-eastus}" \
-          --tenant-id "$AZURE_TENANT_ID" \
-          --subscription-id "$AZURE_SUBSCRIPTION_ID" \
-          --service-principal-id "$AZURE_CLIENT_ID" \
-          --service-principal-secret "$AZURE_CLIENT_SECRET" || echo "  ⚠ Arc registration failed. Continuing without Arc."
-      else
-        echo "==> Registering with Azure Arc (interactive)..."
-        azcmagent connect \
-          --resource-group "${AZURE_RG:-trajectory-rg}" \
-          --location "${AZURE_LOCATION:-eastus}" \
-          --tenant-id "$AZURE_TENANT_ID" \
-          --subscription-id "$AZURE_SUBSCRIPTION_ID" || echo "  ⚠ Arc registration failed. Continuing without Arc."
-      fi
-      echo "  ✓ Node registered in Azure Arc"
-    fi
-  else
-    echo "==> Skipping Azure Arc (no systemd — container environment detected)"
-  fi
-else
-  echo "==> Skipping Azure Arc (set AZURE_TENANT_ID + AZURE_SUBSCRIPTION_ID to enable)"
 fi
 
 echo "==> Done."

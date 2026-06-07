@@ -118,7 +118,7 @@ class LLMClient:
             response = client.chat(
                 model=self.model,
                 messages=messages,
-                options={"temperature": temperature},
+                options={"temperature": temperature, "num_predict": 512},
             )
             response["_node_url"] = node_url
             return response
