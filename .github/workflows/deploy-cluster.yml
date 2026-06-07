@@ -1,0 +1,164 @@
+name: Deploy GPU Cluster
+
+on:
+  workflow_dispatch:
+    inputs:
+      node1_ip:
+        description: 'Node 1 public IP'
+        required: true
+        default: '142.126.17.171'
+      node1_ssh_port:
+        description: 'Node 1 SSH port'
+        required: true
+        default: '43918'
+      node2_ip:
+        description: 'Node 2 public IP'
+        required: true
+        default: '174.116.164.194'
+      node2_ssh_port:
+        description: 'Node 2 SSH port'
+        required: true
+        default: '42248'
+
+jobs:
+  deploy-node2:
+    name: Deploy Node 2 (Collector)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p ${{ inputs.node2_ssh_port }} ${{ inputs.node2_ip }} >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Copy code to Node 2
+        run: |
+          rsync -avz --exclude='.git' --exclude='data/' --exclude='.venv' --exclude='__pycache__' \
+            -e "ssh -p ${{ inputs.node2_ssh_port }} -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no" \
+            ./ root@${{ inputs.node2_ip }}:/workspace/trajectory/
+
+      - name: Setup Node 2
+        run: |
+          ssh -p ${{ inputs.node2_ssh_port }} -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            root@${{ inputs.node2_ip }} bash -s <<'REMOTE'
+          set -euo pipefail
+          cd /workspace/trajectory
+
+          export ROLE=collector
+          export NODE_ID=node-2
+          export PEER_IP=${{ inputs.node1_ip }}
+          export INGEST_URL=http://${{ inputs.node1_ip }}:8000
+          export AZURE_TENANT_ID=${{ secrets.AZURE_TENANT_ID }}
+          export AZURE_SUBSCRIPTION_ID=${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          export AZURE_CLIENT_ID=${{ secrets.AZURE_CLIENT_ID }}
+          export AZURE_CLIENT_SECRET=${{ secrets.AZURE_CLIENT_SECRET }}
+
+          bash deploy/vastai_setup.sh
+          REMOTE
+
+      - name: Verify Node 2
+        run: |
+          ssh -p ${{ inputs.node2_ssh_port }} -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            root@${{ inputs.node2_ip }} "curl -s http://localhost:11434/api/tags | head -c 200"
+
+  deploy-node1:
+    name: Deploy Node 1 (Primary)
+    runs-on: ubuntu-latest
+    needs: deploy-node2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p ${{ inputs.node1_ssh_port }} ${{ inputs.node1_ip }} >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Copy code to Node 1
+        run: |
+          rsync -avz --exclude='.git' --exclude='data/' --exclude='.venv' --exclude='__pycache__' \
+            -e "ssh -p ${{ inputs.node1_ssh_port }} -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no" \
+            ./ root@${{ inputs.node1_ip }}:/workspace/trajectory/
+
+      - name: Setup Node 1
+        run: |
+          ssh -p ${{ inputs.node1_ssh_port }} -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            root@${{ inputs.node1_ip }} bash -s <<'REMOTE'
+          set -euo pipefail
+          cd /workspace/trajectory
+
+          export ROLE=primary
+          export NODE_ID=node-1
+          export PEER_IP=${{ inputs.node2_ip }}
+          export NODE_2_IP=${{ inputs.node2_ip }}
+          export AZURE_TENANT_ID=${{ secrets.AZURE_TENANT_ID }}
+          export AZURE_SUBSCRIPTION_ID=${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          export AZURE_CLIENT_ID=${{ secrets.AZURE_CLIENT_ID }}
+          export AZURE_CLIENT_SECRET=${{ secrets.AZURE_CLIENT_SECRET }}
+
+          bash deploy/vastai_setup.sh
+          REMOTE
+
+      - name: Verify cluster
+        run: |
+          sleep 10
+          ssh -p ${{ inputs.node1_ssh_port }} -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            root@${{ inputs.node1_ip }} bash -s <<'VERIFY'
+          echo "=== App status ==="
+          curl -s http://localhost:8000/ingest/status || echo "App not ready yet"
+          echo ""
+          echo "=== Ollama (local) ==="
+          curl -s http://localhost:11434/api/tags | head -c 200
+          echo ""
+          echo "=== Ollama (Node 2) ==="
+          curl -s http://${{ inputs.node2_ip }}:11434/api/tags | head -c 200
+          echo ""
+          echo "=== Processes ==="
+          pgrep -a "uvicorn|gpu_collector|network_collector|stream_" || echo "No processes found"
+          VERIFY
+
+      - name: Print access info
+        run: |
+          echo "============================================"
+          echo "  CLUSTER DEPLOYED"
+          echo "============================================"
+          echo ""
+          echo "  SSH tunnel:"
+          echo "    ssh -p ${{ inputs.node1_ssh_port }} -i ~/.ssh/innovation root@${{ inputs.node1_ip }} \\"
+          echo "      -L 8000:localhost:8000 -L 16686:localhost:16686 -L 3000:localhost:3000"
+          echo ""
+          echo "  Chat:      http://localhost:8000/static/index.html"
+          echo "  Analytics: http://localhost:8000/static/analytics.html"
+          echo "  Jaeger:    http://localhost:16686"
+          echo "  Grafana:   http://localhost:3000"
+          echo "  Status:    http://localhost:8000/ingest/status"
+          echo "============================================"
+
+  shutdown:
+    name: Shutdown Cluster
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && false
+    steps:
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+      - name: Stop Node 1
+        run: |
+          ssh -p ${{ inputs.node1_ssh_port }} -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            root@${{ inputs.node1_ip }} \
+            "pkill -f uvicorn; pkill -f gpu_collector; pkill -f network_collector; pkill -f stream_; docker compose -f /workspace/trajectory/docker-compose.yml down 2>/dev/null; echo done" || true
+
+      - name: Stop Node 2
+        run: |
+          ssh -p ${{ inputs.node2_ssh_port }} -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            root@${{ inputs.node2_ip }} \
+            "pkill -f gpu_collector; pkill -f network_collector; pkill ollama; echo done" || true

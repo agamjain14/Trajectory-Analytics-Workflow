@@ -1,0 +1,5 @@
+# Streaming-only dependencies (PySpark + delta-spark)
+# Installed only when DEPLOY_MODE=streaming
+# Requires JDK at runtime
+pyspark>=3.5.0
+delta-spark>=3.1.0

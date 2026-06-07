@@ -25,6 +25,10 @@ from src.metrics import AppMetrics
 # Backend selection
 LLM_BACKEND = os.getenv("LLM_BACKEND", "ollama")  # "ollama" or "azure"
 
+# Multi-node Ollama: comma-separated URLs for round-robin load balancing
+# e.g. OLLAMA_NODES=http://node1:11434,http://node2:11434
+OLLAMA_NODES = os.getenv("OLLAMA_NODES", "")
+
 
 class LLMClient:
     """LLM client supporting Ollama and Azure OpenAI with OpenTelemetry tracing."""
@@ -33,6 +37,7 @@ class LLMClient:
         self.metrics = app_metrics
         self.backend = LLM_BACKEND
         self._retry_count = 0
+        self._node_index = 0
 
         if self.backend == "azure":
             from openai import AzureOpenAI
@@ -43,11 +48,30 @@ class LLMClient:
                 api_key=os.getenv("AZURE_OPENAI_API_KEY", ""),
                 api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-08-01-preview"),
             )
+            self._ollama_clients = []
         else:
-            import ollama
+            import ollama as ollama_lib
             self.base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
             self.model = os.getenv("OLLAMA_MODEL", "llama3.2")
-            self.client = ollama.Client(host=self.base_url)
+
+            # Build list of Ollama clients for round-robin
+            if OLLAMA_NODES:
+                node_urls = [u.strip() for u in OLLAMA_NODES.split(",") if u.strip()]
+            else:
+                node_urls = [self.base_url]
+
+            self._ollama_clients = [
+                {"url": url, "client": ollama_lib.Client(host=url)} for url in node_urls
+            ]
+            self.client = self._ollama_clients[0]["client"]
+
+    def _next_ollama_client(self):
+        """Round-robin select the next Ollama client."""
+        if not self._ollama_clients:
+            return self.client, self.base_url
+        node = self._ollama_clients[self._node_index % len(self._ollama_clients)]
+        self._node_index += 1
+        return node["client"], node["url"]
 
     def _before_retry(self, retry_state):
         """Log retry attempts and record metrics."""
@@ -87,13 +111,16 @@ class LLMClient:
                 "message": {"content": content},
                 "eval_count": tokens,
                 "prompt_eval_count": input_tokens,
+                "_node_url": self.base_url,
             }
         else:
-            response = self.client.chat(
+            client, node_url = self._next_ollama_client()
+            response = client.chat(
                 model=self.model,
                 messages=messages,
                 options={"temperature": temperature},
             )
+            response["_node_url"] = node_url
             return response
 
     def chat(
@@ -131,6 +158,7 @@ class LLMClient:
                 tokens = response.get("eval_count", len(content.split()) * 2)
 
                 span.set_attribute("gen_ai.response.model", self.model)
+                span.set_attribute("gen_ai.response.node_url", response.get("_node_url", self.base_url))
                 span.set_attribute("gen_ai.usage.output_tokens", tokens)
                 span.set_attribute("gen_ai.usage.input_tokens", response.get("prompt_eval_count", len(str(messages)) // 4))
                 span.set_attribute("gen_ai.response.content_length", len(content))

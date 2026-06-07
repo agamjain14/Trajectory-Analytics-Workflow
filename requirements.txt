@@ -2,7 +2,7 @@
 openai>=1.0.0
 ollama>=0.3.0
 chromadb>=0.4.0
-sentence-transformers>=2.2.0
+# sentence-transformers removed: not imported anywhere; ChromaDB uses its own default embeddings
 
 # OpenTelemetry - Core
 opentelemetry-api>=1.20.0
@@ -41,6 +41,6 @@ pulsar-client>=3.4.0
 deltalake>=0.17.0
 pyarrow>=15.0.0
 
-# Spark Structured Streaming
-pyspark>=3.5.0
-delta-spark>=3.1.0
+# Spark Structured Streaming (heavy — install via requirements-streaming.txt or DEPLOY_MODE=streaming)
+# pyspark>=3.5.0
+# delta-spark>=3.1.0

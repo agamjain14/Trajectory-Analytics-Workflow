@@ -4,6 +4,30 @@
 version: "3.9"
 
 services:
+  # The main application: Chat + Analytics + Live Metrics
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - LLM_BACKEND=${LLM_BACKEND:-ollama}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.2}
+      - AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT:-}
+      - AZURE_OPENAI_API_KEY=${AZURE_OPENAI_API_KEY:-}
+      - AZURE_OPENAI_DEPLOYMENT=${AZURE_OPENAI_DEPLOYMENT:-gpt-4o-mini}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - DATA_DIR=/app/data
+    volumes:
+      - app-data:/app/data
+    depends_on:
+      - otel-collector
+      - pulsar
+    networks:
+      - observability
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
   # OpenTelemetry Collector - receives traces, metrics, logs and routes them
   otel-collector:
     image: otel/opentelemetry-collector-contrib:latest
@@ -76,3 +100,4 @@ networks:
 
 volumes:
   grafana-data:
+  app-data:

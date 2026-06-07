@@ -5,6 +5,7 @@ questions for missing info, only executes trip planning when all details are gat
 Fully instrumented end-to-end.
 """
 
+import asyncio
 import json
 import time
 from typing import Optional
@@ -161,6 +162,13 @@ async def lifespan(app: FastAPI):
     )
     tracer_instance = get_tracer()
     logger.info("chat_server.ready")
+
+    # Start background tasks: synthetic metrics fallback + correlation
+    from src.live_metrics import synthetic_metrics_loop, correlation_loop
+    asyncio.create_task(synthetic_metrics_loop())
+    asyncio.create_task(correlation_loop())
+    logger.info("chat_server.background_tasks_started")
+
     yield
     shutdown_telemetry()
 
@@ -199,6 +207,10 @@ app.get("/analytics/correlation/alerts")(get_correlation_alerts)
 app.get("/analytics/microstructure")(get_microstructure)
 app.get("/analytics/routing")(get_routing)
 app.get("/analytics/summary")(get_llm_summary)
+
+# Mount live metrics ingest endpoints (Vast.ai collectors push here)
+from src.live_metrics import router as live_metrics_router
+app.include_router(live_metrics_router)
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 

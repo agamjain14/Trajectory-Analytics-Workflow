@@ -215,82 +215,98 @@ Structured JSON logs via OpenTelemetry LoggerProvider + `structlog`, automatical
 
 ## Setup Instructions
 
-### Prerequisites
+### Option A: Local (one command)
 
-- Python 3.11+
-- [Ollama](https://ollama.ai/) installed and running
-- Docker & Docker Compose
-- Java 8+ (required by PySpark)
-
-### 1. Clone & Install
+**Prerequisites:** Docker, Docker Compose, ~6GB free disk (for Ollama model download).
 
 ```bash
-git clone <repo-url>
-cd Trajectory-Analytics-Workflow
-
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+make local
 ```
 
-### 2. Start Ollama
+This starts everything: Ollama + model pull + App + OTel Collector + Jaeger + Prometheus + Grafana + Pulsar.
+
+Once ready (~60s for first-time model download):
+
+| Service | URL |
+|---------|-----|
+| Chat UI | http://localhost:8000/static/index.html |
+| Analytics | http://localhost:8000/static/analytics.html |
+| Topology | http://localhost:8000/static/topology.html |
+| API Docs | http://localhost:8000/docs |
+| Jaeger | http://localhost:16686 |
+| Grafana | http://localhost:3000 (admin/admin) |
+
+Stop: `make down`
+
+---
+
+### Option B: Live GPU Cluster (2-node Vast.ai)
+
+Deploys across 2 Vast.ai GPU nodes with real GPU/network metrics, round-robin LLM inference, and Azure Arc registration.
+
+**Prerequisites:** 2 Vast.ai GPU instances running, SSH key added to both.
+
+#### Automated (GitHub Actions)
+
+1. Push code to GitHub
+2. Go to **Actions → Deploy GPU Cluster → Run workflow**
+3. Enter the 4 Vast.ai node details (IPs + SSH ports)
+4. Wait for deploy (~5 min)
+
+#### Manual (one command)
 
 ```bash
-ollama pull llama3.2
-ollama serve
+bash run_cluster.sh
 ```
 
-### 3. Start Observability Stack
+#### Access (via SSH tunnel)
 
 ```bash
-docker-compose up -d
+ssh -p <NODE1_SSH_PORT> -i ~/.ssh/innovation root@<NODE1_IP> \
+  -L 8000:localhost:8000 -L 16686:localhost:16686 -L 3000:localhost:3000
 ```
 
-This starts:
-- **OTel Collector** — OTLP gRPC (:4317) and HTTP (:4318)
-- **Jaeger** — Trace UI at http://localhost:16686
-- **Prometheus** — Metrics at http://localhost:9090
-- **Grafana** — Dashboards at http://localhost:3000 (admin/admin)
-- **Apache Pulsar** — Streaming backbone at :6650
+| Service | URL |
+|---------|-----|
+| Chat UI | http://localhost:8000/static/index.html |
+| Analytics Dashboard | http://localhost:8000/static/analytics.html |
+| Topology View | http://localhost:8000/static/topology.html |
+| API Docs | http://localhost:8000/docs |
+| Metric Source Status | http://localhost:8000/ingest/status |
+| Jaeger (traces) | http://localhost:16686 |
+| Grafana (dashboards) | http://localhost:3000 (admin/admin) |
 
-### 4. Run the Application
-
-Open separate terminals for each process (activate venv in each):
-
-```bash
-# Terminal 1 — Trace ingestion (Pulsar → Delta Lake)
-python -m src.trace_consumer
-
-# Terminal 2 — Chat server (generates traced agent interactions)
-uvicorn src.chat_server:app --reload --port 8000
-
-# Terminal 3-7 — Streaming pipeline (Spark Structured Streaming, one each)
-python -m src.stream_agent_steps
-python -m src.stream_trajectory
-python -m src.stream_quality
-python -m src.stream_routing_infra
-python -m src.stream_correlated
-
-# Terminal 8 — Analytics dashboard
-uvicorn src.analytics_api:app --port 8002
-```
-
-### 5. Generate Traces & View Results
+#### API Endpoints
 
 ```bash
-# Send a chat request
+# Chat with the agent
 curl -X POST http://localhost:8000/api/chat \
   -H "Content-Type: application/json" \
   -d '{"message": "Plan a trip to Tokyo for 5 days"}'
 
-# View analytics dashboard
-open http://localhost:8002/analytics
+# Check real vs synthetic metric source
+curl http://localhost:8000/ingest/status
 
-# Check API endpoints
-curl http://localhost:8002/analytics/trajectories | python -m json.tool
-curl http://localhost:8002/analytics/quality | python -m json.tool
-curl http://localhost:8002/analytics/correlation/traces | python -m json.tool
+# Analytics queries
+curl http://localhost:8000/analytics/trajectories
+curl http://localhost:8000/analytics/quality
+curl http://localhost:8000/analytics/correlation/traces
+curl http://localhost:8000/analytics/gpu
+curl http://localhost:8000/analytics/network
 ```
+
+#### Cluster layout
+
+```
+Node 1 (primary): App + Observability + Spark streaming + Ollama + Collectors
+Node 2 (collector): Ollama + GPU/Network collectors + Judge model (qwen2.5:7b)
+```
+
+Both nodes serve LLM inference (round-robin). Quality evaluation uses the stronger judge model on Node 2. GPU and network metrics are real (NVML + psutil). When Vast.ai is off, the app falls back to synthetic metrics automatically (30s timeout).
+
+See [DEPLOY_GUIDE.md](DEPLOY_GUIDE.md) for the full step-by-step runbook.
+
+---
 
 ### Reset All Data
 

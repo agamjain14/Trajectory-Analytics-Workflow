@@ -128,6 +128,14 @@ def main():
     os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
     print(f"GPU Collector: {len(handles)} GPU(s) on {NODE_ID}, interval={COLLECT_INTERVAL}s", file=sys.stderr)
 
+    # Push mode: POST to remote server if INGEST_URL is set
+    ingest_url = os.getenv("INGEST_URL", "")
+    session = None
+    if ingest_url:
+        import requests
+        session = requests.Session()
+        print(f"Push mode: sending to {ingest_url}/ingest/gpu_metrics", file=sys.stderr)
+
     with open(OUTPUT_FILE, "a") as f:
         while True:
             rows = collect_gpu_metrics(handles)
@@ -136,6 +144,18 @@ def main():
                 print(line, flush=True)
                 f.write(line + "\n")
                 f.flush()
+
+                # Push to remote server
+                if session and ingest_url:
+                    try:
+                        session.post(
+                            f"{ingest_url}/ingest/gpu_metrics",
+                            json=row,
+                            timeout=5,
+                        )
+                    except Exception as e:
+                        print(f"Push failed: {e}", file=sys.stderr)
+
             time.sleep(COLLECT_INTERVAL)
 
 

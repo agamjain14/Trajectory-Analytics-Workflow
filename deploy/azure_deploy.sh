@@ -1,66 +1,153 @@
 #!/usr/bin/env bash
-# Deploy to Azure Container Apps (consumption tier, scales to zero).
-# Prerequisites: az CLI logged in, Docker image pushed to ACR.
-# Usage: bash deploy/azure_deploy.sh
+# Deploy app stack to Azure VM (B2s: 2 vCPU, 4GB RAM, ~$0.012/hr).
+# Runs docker-compose: App + Pulsar + OTel + Jaeger + Prometheus + Grafana
+# LLM inference runs on Vast.ai (Ollama). GPU metrics pushed to /ingest/* endpoints.
+#
+# Prerequisites:
+#   - az CLI logged in (az login)
+#   - Git repo pushed to GitHub (for VM to clone)
+#
+# Usage:
+#   export OLLAMA_BASE_URL="http://<vastai-ip>:11434"
+#   bash deploy/azure_deploy.sh
 set -euo pipefail
 
-# Config - override via env
+# --- Config (override via env) ---
 RG="${AZURE_RG:-trajectory-rg}"
 LOCATION="${AZURE_LOCATION:-eastus}"
-ACR_NAME="${AZURE_ACR:-trajectoryacr}"
-APP_NAME="${AZURE_APP:-trajectory-analytics}"
-ENV_NAME="${AZURE_ENV:-trajectory-env}"
-IMAGE_TAG="${IMAGE_TAG:-latest}"
+VM_NAME="${AZURE_VM:-trajectory-vm}"
+VM_SIZE="${AZURE_VM_SIZE:-Standard_B2s}"
+ADMIN_USER="azureuser"
+GITHUB_REPO="${GITHUB_REPO:-https://github.com/YOUR_USER/Trajectory-Analytics-Workflow.git}"
 
-echo "==> Creating resource group: $RG"
-az group create --name "$RG" --location "$LOCATION" -o none
+echo "============================================"
+echo "  Deploying to Azure VM ($VM_SIZE)"
+echo "  Cost: ~\$0.012/hr (\$8.76/month if 24/7)"
+echo "============================================"
 
-echo "==> Creating Azure Container Registry: $ACR_NAME"
-az acr create --resource-group "$RG" --name "$ACR_NAME" --sku Basic --admin-enabled true -o none
+# --- Step 1: Resource Group ---
+echo ""
+echo "[1/5] Creating resource group: $RG..."
+az group create --name "$RG" --location "$LOCATION" -o none 2>/dev/null || true
 
-echo "==> Building and pushing Docker image..."
-az acr build --registry "$ACR_NAME" --image "trajectory:$IMAGE_TAG" . --no-logs
+# --- Step 2: Create VM ---
+echo "[2/5] Creating VM: $VM_NAME ($VM_SIZE)..."
+VM_EXISTS=$(az vm show -g "$RG" -n "$VM_NAME" --query "id" -o tsv 2>/dev/null || echo "")
 
-ACR_SERVER="$ACR_NAME.azurecr.io"
-ACR_PASSWORD=$(az acr credential show -n "$ACR_NAME" --query "passwords[0].value" -o tsv)
+if [ -z "$VM_EXISTS" ]; then
+    az vm create \
+        --resource-group "$RG" \
+        --name "$VM_NAME" \
+        --image Ubuntu2404 \
+        --size "$VM_SIZE" \
+        --admin-username "$ADMIN_USER" \
+        --generate-ssh-keys \
+        --public-ip-sku Standard \
+        -o none
+    echo "  ✓ VM created"
+else
+    # Make sure it's running
+    az vm start -g "$RG" -n "$VM_NAME" -o none 2>/dev/null || true
+    echo "  ✓ VM already exists (started)"
+fi
 
-echo "==> Creating Container Apps environment: $ENV_NAME"
-az containerapp env create \
-  --name "$ENV_NAME" \
-  --resource-group "$RG" \
-  --location "$LOCATION" \
-  -o none
+# --- Step 3: Open ports ---
+echo "[3/5] Opening ports..."
+for PORT_INFO in "8000:1000" "16686:1001" "9090:1002" "3000:1003" "8081:1004"; do
+    PORT="${PORT_INFO%%:*}"
+    PRIORITY="${PORT_INFO##*:}"
+    az vm open-port -g "$RG" -n "$VM_NAME" --port "$PORT" --priority "$PRIORITY" -o none 2>/dev/null || true
+done
+echo "  ✓ Ports open: 8000 (app), 16686 (Jaeger), 9090 (Prometheus), 3000 (Grafana), 8081 (Pulsar)"
 
-echo "==> Deploying Container App: $APP_NAME"
-az containerapp create \
-  --name "$APP_NAME" \
-  --resource-group "$RG" \
-  --environment "$ENV_NAME" \
-  --image "$ACR_SERVER/trajectory:$IMAGE_TAG" \
-  --registry-server "$ACR_SERVER" \
-  --registry-username "$ACR_NAME" \
-  --registry-password "$ACR_PASSWORD" \
-  --target-port 8000 \
-  --ingress external \
-  --min-replicas 0 \
-  --max-replicas 1 \
-  --cpu 0.5 \
-  --memory 1.0Gi \
-  --env-vars \
-    "DEPLOY_MODE=cloud" \
-    "LLM_BACKEND=azure" \
-    "AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT:?Set AZURE_OPENAI_ENDPOINT}" \
-    "AZURE_OPENAI_API_KEY=${AZURE_OPENAI_API_KEY:?Set AZURE_OPENAI_API_KEY}" \
-    "AZURE_OPENAI_DEPLOYMENT=${AZURE_OPENAI_DEPLOYMENT:-gpt-4o-mini}" \
-  -o none
+# --- Step 4: Get VM IP ---
+VM_IP=$(az vm show -g "$RG" -n "$VM_NAME" -d --query "publicIps" -o tsv)
+echo "  VM Public IP: $VM_IP"
 
-FQDN=$(az containerapp show --name "$APP_NAME" --resource-group "$RG" \
-  --query "properties.configuration.ingress.fqdn" -o tsv)
+# --- Step 5: Setup & Deploy on VM ---
+echo "[4/5] Setting up Docker + deploying application..."
+
+# Create the .env content
+ENV_CONTENT="LLM_BACKEND=${LLM_BACKEND:-ollama}
+OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.2}
+DEPLOY_MODE=cloud"
+
+az vm run-command invoke \
+    --resource-group "$RG" \
+    --name "$VM_NAME" \
+    --command-id RunShellScript \
+    --scripts "
+set -e
+
+# Install Docker
+if ! command -v docker &>/dev/null; then
+    curl -fsSL https://get.docker.com | sh
+    usermod -aG docker $ADMIN_USER
+fi
+
+# Install Docker Compose plugin
+if ! docker compose version &>/dev/null 2>&1; then
+    apt-get update && apt-get install -y docker-compose-plugin
+fi
+
+# Clone or update repo
+REPO_DIR='/home/$ADMIN_USER/app'
+if [ -d \"\$REPO_DIR/.git\" ]; then
+    cd \"\$REPO_DIR\" && git pull origin main
+else
+    rm -rf \"\$REPO_DIR\"
+    git clone $GITHUB_REPO \"\$REPO_DIR\"
+fi
+cd \"\$REPO_DIR\"
+
+# Write .env
+cat > .env << 'ENVEOF'
+$ENV_CONTENT
+ENVEOF
+
+# Ensure data directory exists
+mkdir -p data/gpu_metrics data/network_metrics data/agent_steps data/trace_correlated
+
+# Build and start
+docker compose down 2>/dev/null || true
+docker compose up -d --build
+
+echo 'Deployment complete!'
+docker compose ps
+" -o none
 
 echo ""
-echo "==> Deployed! Live URL:"
-echo "    https://$FQDN"
+echo "[5/5] Verifying deployment..."
+sleep 10
+if curl -s --max-time 10 "http://$VM_IP:8000/docs" >/dev/null 2>&1; then
+    echo "  ✓ App is responding!"
+else
+    echo "  ⚠ App may still be starting (containers building). Check in 2-3 minutes."
+fi
+
 echo ""
-echo "    Dashboard: https://$FQDN/static/index.html"
-echo "    Analytics: https://$FQDN/static/analytics.html"
-echo "    API docs:  https://$FQDN/docs"
+echo "============================================"
+echo "  DEPLOYMENT COMPLETE"
+echo "============================================"
+echo ""
+echo "  Application:       http://$VM_IP:8000/static/index.html"
+echo "  Analytics:         http://$VM_IP:8000/static/analytics.html"
+echo "  API Docs:          http://$VM_IP:8000/docs"
+echo "  Jaeger (traces):   http://$VM_IP:16686"
+echo "  Prometheus:        http://$VM_IP:9090"
+echo "  Grafana:           http://$VM_IP:3000  (admin/admin)"
+echo "  Pulsar Admin:      http://$VM_IP:8081"
+echo ""
+echo "  Data Source Status: http://$VM_IP:8000/ingest/status"
+echo ""
+echo "  ─── Connect Vast.ai GPU nodes (optional) ───"
+echo "  On each Vast.ai node, run:"
+echo "    INGEST_URL=http://$VM_IP:8000 NODE_ID=node-1 python3 -m src.gpu_collector"
+echo "    INGEST_URL=http://$VM_IP:8000 NODE_ID=node-1 PEER_IP=<other> python3 -m src.network_collector"
+echo ""
+echo "  ─── Cost management ───"
+echo "  Stop VM:   az vm deallocate -g $RG -n $VM_NAME  (stops billing)"
+echo "  Start VM:  az vm start -g $RG -n $VM_NAME"
+echo "  Delete:    az group delete -g $RG --yes"
+echo "============================================"
