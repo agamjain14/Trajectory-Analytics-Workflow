@@ -215,6 +215,23 @@ Structured JSON logs via OpenTelemetry LoggerProvider + `structlog`, automatical
 
 ## Setup Instructions
 
+### Live Demo (Azure VM)
+
+The system is deployed and running on Azure. Access it directly:
+
+| Service | URL |
+|---------|-----|
+| Chat UI | http://20.98.203.5:8000/static/index.html |
+| Analytics | http://20.98.203.5:8000/static/analytics.html |
+| Topology | http://20.98.203.5:8000/static/topology.html |
+| API Docs | http://20.98.203.5:8000/docs |
+| Jaeger | http://20.98.203.5:16686 |
+| Grafana | http://20.98.203.5:3000 (admin/admin) |
+| Prometheus | http://20.98.203.5:9090 |
+| Status | http://20.98.203.5:8000/ingest/status |
+
+---
+
 ### Option A: Local (one command)
 
 **Prerequisites:** Docker, Docker Compose, ~6GB free disk (for Ollama model download).
