@@ -45,7 +45,7 @@ services:
     depends_on:
       ollama:
         condition: service_healthy
-    entrypoint: ["sh", "-c", "ollama pull llama3.2:1b && ollama pull llama3.2 && echo 'Models ready'"]
+    entrypoint: ["sh", "-c", "ollama pull llama3.2:1b && echo 'Models ready'"]
     environment:
       - OLLAMA_HOST=ollama:11434
     networks:
@@ -62,7 +62,7 @@ services:
       - LLM_BACKEND=ollama
       - OLLAMA_BASE_URL=http://ollama:11434
       - OLLAMA_MODEL=llama3.2:1b
-      - INTENT_MODEL=llama3.2
+      - INTENT_MODEL=llama3.2:1b
       - SUMMARY_MODEL=llama3.2:1b
       - EVAL_MODEL=llama3.2:1b
       - JUDGE_BACKEND=ollama
@@ -125,21 +125,6 @@ services:
     networks:
       - observability
 
-  grafana:
-    image: grafana/grafana:latest
-    environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-      - GF_AUTH_ANONYMOUS_ENABLED=true
-    ports:
-      - "3000:3000"
-    volumes:
-      - grafana-data:/var/lib/grafana
-    depends_on:
-      - prometheus
-      - jaeger
-    networks:
-      - observability
-
   # --- Streaming Backbone ---
   pulsar:
     image: apachepulsar/pulsar:3.3.0
@@ -190,5 +175,4 @@ networks:
 volumes:
   ollama-models:
   app-data:
-  grafana-data:
   chroma-cache:

@@ -78,19 +78,23 @@ if [ "$ROLE" = "primary" ]; then
 
   echo "==> Starting app..."
   nohup uvicorn src.chat_server:app --host 0.0.0.0 --port 8000 > /tmp/app.log 2>&1 &
+  disown
   sleep 3
 
   # Start Pulsar → Delta bridge (consumes OTLP spans, writes trace_delta_table)
   echo "==> Starting trace consumer (Pulsar → Delta)..."
   nohup python3 -m src.trace_consumer > /tmp/trace_consumer.log 2>&1 &
+  disown
 
   # Collectors push to local app
   INGEST_URL="http://localhost:8000"
   echo "==> Starting collectors (local push)..."
   INGEST_URL="$INGEST_URL" NODE_ID="$NODE_ID" PEER_IP="$PEER_IP" \
     nohup python3 -m src.gpu_collector > /tmp/gpu_collector.log 2>&1 &
+  disown
   INGEST_URL="$INGEST_URL" NODE_ID="$NODE_ID" PEER_IP="$PEER_IP" \
     nohup python3 -m src.network_collector > /tmp/net_collector.log 2>&1 &
+  disown
 
   # Start streaming jobs (Spark local[*])
   echo "==> Starting Spark streaming jobs (local master)..."
@@ -101,10 +105,15 @@ if [ "$ROLE" = "primary" ]; then
   export JUDGE_BACKEND=ollama
 
   nohup python3 -m src.stream_agent_steps > /tmp/stream_agent_steps.log 2>&1 &
+  disown
   nohup python3 -m src.stream_routing_infra > /tmp/stream_routing.log 2>&1 &
+  disown
   nohup python3 -m src.stream_correlated > /tmp/stream_correlated.log 2>&1 &
+  disown
   nohup python3 -m src.stream_trajectory > /tmp/stream_trajectory.log 2>&1 &
+  disown
   nohup python3 -m src.stream_quality > /tmp/stream_quality.log 2>&1 &
+  disown
 
   echo ""
   echo "==> Primary node ready!"
@@ -124,8 +133,10 @@ else
   echo "==> Starting collectors (pushing to $INGEST_URL)..."
   INGEST_URL="$INGEST_URL" NODE_ID="$NODE_ID" PEER_IP="$PEER_IP" \
     nohup python3 -m src.gpu_collector > /tmp/gpu_collector.log 2>&1 &
+  disown
   INGEST_URL="$INGEST_URL" NODE_ID="$NODE_ID" PEER_IP="$PEER_IP" \
     nohup python3 -m src.network_collector > /tmp/net_collector.log 2>&1 &
+  disown
 
   echo ""
   echo "==> Collector node ready!"

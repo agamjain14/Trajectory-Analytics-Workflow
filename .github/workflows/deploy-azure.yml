@@ -1,0 +1,264 @@
+name: Deploy to Azure
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: true
+        default: 'deploy'
+        type: choice
+        options:
+          - deploy
+          - teardown
+      azure_location:
+        description: 'Azure region'
+        required: true
+        default: 'eastus'
+      vm_size:
+        description: 'Azure VM size'
+        required: true
+        default: 'Standard_B2s'
+      ollama_base_url:
+        description: 'Ollama URL (Vast.ai node). Leave empty to skip LLM.'
+        required: false
+        default: ''
+      node1_ip:
+        description: 'Vast.ai Node 1 IP (for GPU collector push)'
+        required: false
+        default: ''
+      node1_ssh_port:
+        description: 'Vast.ai Node 1 SSH port'
+        required: false
+        default: '43918'
+      node2_ip:
+        description: 'Vast.ai Node 2 IP (for GPU collector push)'
+        required: false
+        default: ''
+      node2_ssh_port:
+        description: 'Vast.ai Node 2 SSH port'
+        required: false
+        default: '42248'
+
+env:
+  AZURE_RG: trajectory-rg
+  AZURE_VM: trajectory-vm
+
+jobs:
+  deploy:
+    name: Deploy Application
+    if: inputs.action == 'deploy'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Create resource group
+        run: |
+          az group create \
+            --name "$AZURE_RG" \
+            --location "${{ inputs.azure_location }}" \
+            -o none 2>/dev/null || true
+
+      - name: Create or start VM
+        id: vm
+        run: |
+          VM_EXISTS=$(az vm show -g "$AZURE_RG" -n "$AZURE_VM" --query "id" -o tsv 2>/dev/null || echo "")
+          if [ -z "$VM_EXISTS" ]; then
+            az vm create \
+              --resource-group "$AZURE_RG" \
+              --name "$AZURE_VM" \
+              --image Ubuntu2404 \
+              --size "${{ inputs.vm_size }}" \
+              --admin-username azureuser \
+              --generate-ssh-keys \
+              --public-ip-sku Standard \
+              -o none
+            echo "created=true" >> "$GITHUB_OUTPUT"
+          else
+            az vm start -g "$AZURE_RG" -n "$AZURE_VM" -o none 2>/dev/null || true
+            echo "created=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          VM_IP=$(az vm show -g "$AZURE_RG" -n "$AZURE_VM" -d --query "publicIps" -o tsv)
+          echo "vm_ip=$VM_IP" >> "$GITHUB_OUTPUT"
+          echo "VM Public IP: $VM_IP"
+
+      - name: Open ports
+        run: |
+          for PORT_INFO in "8000:1000" "16686:1001" "9090:1002" "3000:1003" "8081:1004"; do
+            PORT="${PORT_INFO%%:*}"
+            PRIORITY="${PORT_INFO##*:}"
+            az vm open-port -g "$AZURE_RG" -n "$AZURE_VM" \
+              --port "$PORT" --priority "$PRIORITY" -o none 2>/dev/null || true
+          done
+          echo "Ports open: 8000 (app), 16686 (Jaeger), 9090 (Prometheus), 3000 (Grafana), 8081 (Pulsar)"
+
+      - name: Deploy application
+        run: |
+          OLLAMA_URL="${{ inputs.ollama_base_url }}"
+          if [ -z "$OLLAMA_URL" ]; then
+            OLLAMA_URL="http://host.docker.internal:11434"
+          fi
+
+          # Build env content — escape for heredoc inside az run-command
+          ENV_CONTENT="LLM_BACKEND=ollama
+          OLLAMA_BASE_URL=${OLLAMA_URL}
+          OLLAMA_MODEL=llama3.2
+          DEPLOY_MODE=cloud"
+
+          az vm run-command invoke \
+            --resource-group "$AZURE_RG" \
+            --name "$AZURE_VM" \
+            --command-id RunShellScript \
+            --scripts '
+          set -e
+
+          # Install Docker
+          if ! command -v docker &>/dev/null; then
+              curl -fsSL https://get.docker.com | sh
+          fi
+
+          # Install Docker Compose plugin
+          if ! docker compose version &>/dev/null 2>&1; then
+              apt-get update && apt-get install -y docker-compose-plugin
+          fi
+
+          # Clone or update repo
+          REPO_DIR="/home/azureuser/app"
+          if [ -d "$REPO_DIR/.git" ]; then
+              cd "$REPO_DIR" && git pull origin main
+          else
+              rm -rf "$REPO_DIR"
+              git clone https://github.com/${{ github.repository }}.git "$REPO_DIR"
+          fi
+          cd "$REPO_DIR"
+
+          # Write .env
+          cat > .env <<ENVEOF
+          LLM_BACKEND=ollama
+          OLLAMA_BASE_URL='"${OLLAMA_URL}"'
+          OLLAMA_MODEL=llama3.2
+          DEPLOY_MODE=cloud
+          ENVEOF
+
+          # Clean up leading whitespace from heredoc
+          sed -i "s/^[[:space:]]*//" .env
+
+          # Ensure data directories
+          mkdir -p data/gpu_metrics data/network_metrics data/agent_steps data/trace_correlated
+
+          # Build and start
+          docker compose down 2>/dev/null || true
+          docker compose up -d --build
+
+          echo "=== Container status ==="
+          docker compose ps
+          '
+
+      - name: Verify deployment
+        run: |
+          VM_IP="${{ steps.vm.outputs.vm_ip }}"
+          echo "Waiting for app at $VM_IP:8000 (up to 90s)..."
+          for i in $(seq 1 18); do
+            if curl -sf --max-time 5 "http://$VM_IP:8000/docs" >/dev/null 2>&1; then
+              echo "App is responding!"
+              curl -s "http://$VM_IP:8000/ingest/status" || true
+              break
+            fi
+            echo "  Waiting... ($((i*5))s)"
+            sleep 5
+          done
+          curl -sf --max-time 5 "http://$VM_IP:8000/docs" >/dev/null 2>&1 || echo "App may still be building containers. Check in 2-3 minutes."
+
+      - name: Connect Vast.ai collectors (optional)
+        if: inputs.node1_ip != ''
+        run: |
+          VM_IP="${{ steps.vm.outputs.vm_ip }}"
+
+          # Setup SSH
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+
+          # Point Node 1 collectors at Azure VM
+          if [ -n "${{ inputs.node1_ip }}" ]; then
+            echo "Configuring Node 1 (${{ inputs.node1_ip }}) to push to Azure ($VM_IP)..."
+            ssh -p ${{ inputs.node1_ssh_port }} -o StrictHostKeyChecking=no \
+              root@${{ inputs.node1_ip }} bash -s <<REMOTE
+            # Kill existing collectors if running
+            pkill -f gpu_collector || true
+            pkill -f network_collector || true
+            sleep 2
+            cd /workspace/trajectory
+            INGEST_URL="http://$VM_IP:8000" NODE_ID="node-1" PEER_IP="${{ inputs.node2_ip }}" \
+              nohup python3 -m src.gpu_collector > /tmp/gpu_collector.log 2>&1 &
+            disown
+            INGEST_URL="http://$VM_IP:8000" NODE_ID="node-1" PEER_IP="${{ inputs.node2_ip }}" \
+              nohup python3 -m src.network_collector > /tmp/net_collector.log 2>&1 &
+            disown
+            echo "Node 1 collectors pushing to http://$VM_IP:8000"
+          REMOTE
+          fi
+
+          # Point Node 2 collectors at Azure VM
+          if [ -n "${{ inputs.node2_ip }}" ]; then
+            echo "Configuring Node 2 (${{ inputs.node2_ip }}) to push to Azure ($VM_IP)..."
+            ssh -p ${{ inputs.node2_ssh_port }} -o StrictHostKeyChecking=no \
+              root@${{ inputs.node2_ip }} bash -s <<REMOTE
+            pkill -f gpu_collector || true
+            pkill -f network_collector || true
+            sleep 2
+            cd /workspace/trajectory
+            INGEST_URL="http://$VM_IP:8000" NODE_ID="node-2" PEER_IP="${{ inputs.node1_ip }}" \
+              nohup python3 -m src.gpu_collector > /tmp/gpu_collector.log 2>&1 &
+            disown
+            INGEST_URL="http://$VM_IP:8000" NODE_ID="node-2" PEER_IP="${{ inputs.node1_ip }}" \
+              nohup python3 -m src.network_collector > /tmp/net_collector.log 2>&1 &
+            disown
+            echo "Node 2 collectors pushing to http://$VM_IP:8000"
+          REMOTE
+          fi
+
+      - name: Print access info
+        run: |
+          VM_IP="${{ steps.vm.outputs.vm_ip }}"
+          echo "============================================"
+          echo "  AZURE DEPLOYMENT COMPLETE"
+          echo "============================================"
+          echo ""
+          echo "  Chat:        http://$VM_IP:8000/static/index.html"
+          echo "  Analytics:   http://$VM_IP:8000/static/analytics.html"
+          echo "  API Docs:    http://$VM_IP:8000/docs"
+          echo "  Jaeger:      http://$VM_IP:16686"
+          echo "  Prometheus:  http://$VM_IP:9090"
+          echo "  Grafana:     http://$VM_IP:3000  (admin/admin)"
+          echo "  Status:      http://$VM_IP:8000/ingest/status"
+          echo ""
+          echo "  Cost: ~\$0.012/hr for ${{ inputs.vm_size }}"
+          echo ""
+          echo "  Stop billing: az vm deallocate -g $AZURE_RG -n $AZURE_VM"
+          echo "  Restart:      az vm start -g $AZURE_RG -n $AZURE_VM"
+          echo "  Tear down:    Run this workflow again with action=teardown"
+          echo "============================================"
+
+  teardown:
+    name: Tear Down Azure Resources
+    if: inputs.action == 'teardown'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Delete resource group
+        run: |
+          echo "Deleting resource group $AZURE_RG and all resources..."
+          az group delete --name "$AZURE_RG" --yes --no-wait
+          echo "Resource group deletion initiated (async). All resources will be removed."

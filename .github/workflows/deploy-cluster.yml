@@ -105,11 +105,19 @@ jobs:
 
       - name: Verify cluster
         run: |
-          sleep 10
+          echo "Waiting for app to start (up to 60s)..."
           ssh -p ${{ inputs.node1_ssh_port }} -o StrictHostKeyChecking=no \
             root@${{ inputs.node1_ip }} bash -s <<'VERIFY'
-          echo "=== App status ==="
-          curl -s http://localhost:8000/ingest/status || echo "App not ready yet"
+          for i in $(seq 1 12); do
+            if curl -sf http://localhost:8000/ingest/status >/dev/null 2>&1; then
+              echo "=== App status ==="
+              curl -s http://localhost:8000/ingest/status
+              break
+            fi
+            echo "  Waiting for app... ($((i*5))s)"
+            sleep 5
+          done
+          curl -s http://localhost:8000/ingest/status || echo "App not ready after 60s — check /tmp/app.log"
           echo ""
           echo "=== Ollama (local) ==="
           curl -s http://localhost:11434/api/tags | head -c 200
@@ -119,6 +127,9 @@ jobs:
           echo ""
           echo "=== Processes ==="
           pgrep -a "uvicorn|gpu_collector|network_collector|stream_" || echo "No processes found"
+          echo ""
+          echo "=== App log (last 20 lines) ==="
+          tail -20 /tmp/app.log 2>/dev/null || echo "No app log found"
           VERIFY
 
       - name: Print access info
