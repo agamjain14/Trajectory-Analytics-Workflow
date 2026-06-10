@@ -71,6 +71,12 @@ if [ "$ROLE" = "primary" ]; then
   export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
   export DATA_DIR=./data
   export DEPLOY_MODE=local
+  # Single-writer pipeline: Spark owns the metrics Delta tables. Collectors push
+  # raw JSONL via /ingest/* and stream_routing_infra performs the Delta MERGE.
+  # METRICS_MODE=real disables the in-process synthetic + live correlation loops
+  # so they do NOT dual-write the same tables. Override to "synthetic" only for a
+  # no-collector demo.
+  export METRICS_MODE="${METRICS_MODE:-real}"
   export NODE_1_URL=http://localhost:11434
   export NODE_2_URL="http://${NODE_2_IP}:11434"
   export NODE_1_ID=node-1

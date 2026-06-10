@@ -15,6 +15,8 @@ import random
 import time
 from pathlib import Path
 
+from src.contention import compute_contention_index
+
 
 def generate_gpu_metrics(node_id: str, timestamp_ms: int, t: float, contention_event: bool):
     """Generate one GPU metrics row matching GPU_METRICS_SCHEMA."""
@@ -34,14 +36,10 @@ def generate_gpu_metrics(node_id: str, timestamp_ms: int, t: float, contention_e
     pcie_rx = max(0, min(16000, gpu_util * 60 + random.gauss(0, 400)))
     ecc = random.randint(0, 1) if random.random() < 0.02 else 0
 
-    # Contention index (same formula as real collector)
-    contention = (
-        gpu_util * 0.3
-        + mem_ctrl * 0.25
-        + mem_used * 0.2
-        + (temp / 100) * 0.15
-        + power * 0.1
-    ) / 100.0
+    # Contention index (canonical shared formula — matches real collector)
+    contention = compute_contention_index(
+        gpu_util, mem_ctrl, mem_used, temp, power, throttle, pcie_tx, pcie_rx
+    )
 
     return {
         "timestamp_ms": timestamp_ms,

@@ -164,11 +164,17 @@ async def lifespan(app: FastAPI):
     tracer_instance = get_tracer()
     logger.info("chat_server.ready")
 
-    # Start background tasks: synthetic metrics fallback + correlation
-    from src.live_metrics import synthetic_metrics_loop, correlation_loop
-    asyncio.create_task(synthetic_metrics_loop())
-    asyncio.create_task(correlation_loop())
-    logger.info("chat_server.background_tasks_started")
+    # Start background tasks: synthetic metrics fallback + correlation.
+    # In METRICS_MODE=real, Spark owns the metrics pipeline and correlation, so
+    # these no-Spark loops stay off to avoid dual-writing the Delta tables.
+    # The /ingest/* endpoints remain active in all modes.
+    if os.getenv("METRICS_MODE", "synthetic").lower() != "real":
+        from src.live_metrics import synthetic_metrics_loop, correlation_loop
+        asyncio.create_task(synthetic_metrics_loop())
+        asyncio.create_task(correlation_loop())
+        logger.info("chat_server.background_tasks_started")
+    else:
+        logger.info("chat_server.background_tasks_skipped metrics_mode=real")
 
     yield
     shutdown_telemetry()

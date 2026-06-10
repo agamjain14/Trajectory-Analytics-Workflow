@@ -118,6 +118,8 @@ jobs:
           export NODE_ID=node-1
           export PEER_IP=${{ inputs.node2_ip }}
           export NODE_2_IP=${{ inputs.node2_ip }}
+          # Single-writer pipeline: Spark owns the metrics Delta tables.
+          export METRICS_MODE=real
 
           bash deploy/vastai_setup.sh
           REMOTE

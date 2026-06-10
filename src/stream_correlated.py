@@ -214,7 +214,11 @@ def main():
     ensure_delta_table(spark, QUALITY_PATH, QUALITY_SCHEMA)
     ensure_delta_table(spark, CORRELATED_PATH, CORRELATED_SCHEMA)
 
-    stream_df = spark.readStream.format("delta").load(QUALITY_PATH)
+    stream_df = (
+        spark.readStream.format("delta")
+        .option("skipChangeCommits", "true")
+        .load(QUALITY_PATH)
+    )
 
     query = (
         stream_df.writeStream

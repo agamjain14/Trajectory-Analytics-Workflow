@@ -217,7 +217,11 @@ def main():
     ensure_delta_table(spark, AGENT_STEPS_PATH, AGENT_STEPS_SCHEMA)
     ensure_delta_table(spark, QUALITY_PATH, QUALITY_SCHEMA)
 
-    stream_df = spark.readStream.format("delta").load(AGENT_STEPS_PATH)
+    stream_df = (
+        spark.readStream.format("delta")
+        .option("skipChangeCommits", "true")
+        .load(AGENT_STEPS_PATH)
+    )
 
     query = (
         stream_df.writeStream

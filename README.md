@@ -12,7 +12,7 @@ Multi-agent AI systems are opaque—when an orchestrator delegates to sub-agents
 2. **Score response quality** and correlate quality drops to trajectory patterns
 3. **Attribute degradation to infrastructure** (GPU contention, network latency, routing)
 
-**Solution:** End-to-end observable AI agent system—a travel planner instrumented with OpenTelemetry, feeding Spark Structured Streaming that extracts trajectory templates, scores quality via LLM-as-judge, simulates infrastructure metrics, and joins everything into a correlated analytics view.
+**Solution:** End-to-end observable AI agent system—a travel planner instrumented with OpenTelemetry, feeding Spark Structured Streaming that extracts trajectory templates, scores quality via LLM-as-judge, infrastructure metrics, and joins everything into a correlated analytics view.
 
 ## Architecture
 
@@ -146,89 +146,191 @@ Multi-agent AI systems are opaque—when an orchestrator delegates to sub-agents
   Dashboard UI: /analytics
 ```
 
-## Components
+## Hybrid Deployment (Mac + Vast.ai GPU)
 
-| Component | Purpose |
+Run the **full analytics pipeline locally on a Mac** and offload only the work that needs a physical GPU (LLM inference, LLM-as-judge, GPU/network metrics) to a **Vast.ai GPU node**. NVML metrics require a real GPU, so only collectors and Ollama run remotely.
+
+### High-Level Design
+
+```
+┌─────────────────────────── MAC (full pipeline) ───────────────────────────┐
+│  Chat app :8000 · MCP :8001 · trace_consumer · 5 Spark streams · Delta     │
+│  Docker infra: Pulsar · OTel Collector · Jaeger · Prometheus · Grafana     │
+│  Analytics API + Dashboard                                                 │
+└───────────┬───────────────────────────────────────────┬───────────────────┘
+            │ -L 11435 → Vast Ollama (inference + judge) │ -R 8000 ← collectors
+            ▼                                             ▲
+┌─────────────────────────── VAST.ai (GPU only) ────────────────────────────┐
+│  Ollama :11434 (llama3.2 inference + qwen2.5:7b judge)                     │
+│  gpu_collector + network_collector → POST /ingest/* on Mac                 │
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+- `-L 11435:localhost:11434` — Mac dispatches inference + judge calls to Vast Ollama.
+- `-R 8000:localhost:8000` — Vast collectors push real GPU/network metrics back to the Mac app.
+- `METRICS_MODE=real` makes Spark the single writer; collector JSONL is the only metrics source.
+
+### Where Each Component Runs
+
+| Component | Runs on | Why |
+|-----------|---------|-----|
+| Chat app + agents + OTel instrumentation | Mac | Spans are emitted in-process by the agent code (`src/telemetry.py`); the app dispatches inference to remote Ollama over the tunnel |
+| MCP tool server, `trace_consumer`, 5 Spark streams, Delta tables | Mac | Full analytics pipeline is local |
+| Docker infra (Pulsar, OTel Collector, Jaeger, Prometheus, Grafana) | Mac | Trace backbone + dashboards |
+| Ollama (inference `llama3.2` + judge `qwen2.5:7b`) | Vast.ai | Needs the GPU |
+| `gpu_collector` (NVML) + `network_collector` (psutil) | Vast.ai | NVML/host metrics require the physical GPU node |
+
+**Instrumentation** runs entirely inside the Mac chat app: every agent/LLM/RAG/tool call is wrapped in an OpenTelemetry span, exported via the Pulsar span exporter → Pulsar → `trace_consumer` → `trace_delta_table`. The remote node only serves model tokens; it is not instrumented.
+
+### How GPU / Network Metrics Are Sent
+
+```
+Vast.ai node                              Mac (over -R 8000 reverse tunnel)
+────────────                              ─────────────────────────────────
+gpu_collector  (NVML, every 5s)
+  └─ POST /ingest/gpu_metrics ──────────▶ chat_server :8000
+network_collector (psutil)                  └─ live_metrics router
+  └─ POST /ingest/network_metrics ──────▶       └─ METRICS_MODE=real:
+                                                    append raw JSONL to
+                                                    data/gpu_metrics_raw/*.jsonl
+                                                    data/net_metrics_raw/*.jsonl
+                                                         │
+                                          stream_routing_infra reads the JSONL
+                                          landing zone and MERGEs into the
+                                          gpu_metrics / network_metrics Delta tables
+```
+
+- Collectors poll locally (`COLLECT_INTERVAL=5s`), set `INGEST_URL=http://localhost:8000`, and POST one JSON row per sample. The reverse tunnel makes the Mac's `:8000` reachable as the node's `localhost:8000`.
+- The `/ingest/*` endpoints (`src/live_metrics.py`) only **land raw JSONL** in real mode — they never write Delta directly. This keeps `stream_routing_infra` the **single writer**, avoiding dual-write corruption.
+- `/ingest/status` reports `last_real_gpu_ago_s` / `last_real_net_ago_s`; non-null means real pushes are arriving. If pushes stop for longer than the timeout, the app falls back to synthetic metrics.
+
+### Low-Level Design — Job Consume / Produce
+
+| # | Job | Consumes | Produces | MERGE key |
+|---|-----|----------|----------|-----------|
+| — | `trace_consumer` | Pulsar topic `otlp-traces` | `trace_delta_table` | append |
+| 1 | `stream_agent_steps` | `trace_delta_table` | `agent_steps` | trace_id, session_id, span_id |
+| 2 | `stream_trajectory` | `agent_steps` | `trajectory_templates` | trace_id, session_id |
+| 3 | `stream_quality` | `agent_steps` + Vast judge (`EVAL_MODEL`) | `quality_scores` | trace_id, session_id |
+| 4 | `stream_routing_infra` | `agent_steps` (REASON spans) + `gpu_metrics_raw/*.jsonl`, `net_metrics_raw/*.jsonl` | `request_routing`, `gpu_metrics`, `network_metrics` | routing: trace_id, span_id · metrics: timestamp_ms, node_id, gpu_id |
+| 5 | `stream_correlated` | `quality_scores` (+ joins trajectory, routing, gpu, network) | `trace_correlated` | trace_id, session_id |
+
+All downstream streams read upstream Delta tables with `skipChangeCommits=true` (upstream uses MERGE/upsert, so change commits must be ignored). GPU/network ingest only runs on micro-batches where `agent_steps` is non-empty — metrics tables populate only after a chat generates spans.
+
+### Table Dependencies
+
+```
+trace_delta_table
+   └─▶ agent_steps ──┬─▶ trajectory_templates ─┐
+                     ├─▶ quality_scores ────────┼─▶ trace_correlated
+                     └─▶ request_routing ───────┤
+                                                │
+   gpu_metrics_raw/*.jsonl ─▶ gpu_metrics ──────┤
+   net_metrics_raw/*.jsonl ─▶ network_metrics ──┘
+```
+
+- `agent_steps` is the fan-out hub: streams 2, 3, 4 all derive from it.
+- `trace_correlated` is the join sink keyed on `(trace_id, session_id)`; it correlates quality with trajectory, routing, GPU, and network on the same trace.
+- GPU/network tables are partitioned by `(ingestion_date, ingestion_hour)`, derived from `timestamp_ms` inside the routing job.
+
+### What Each Table Means
+
+| Table | High-level meaning |
+|-------|--------------------|
+| `trace_delta_table` | Raw OTLP spans landed from Pulsar — the unprocessed firehose |
+| `agent_steps` | One row per classified span: **what the agent DID** (which agent, model, tokens, span kind, serving `node_id`) |
+| `trajectory_templates` | Per-trace execution shape: **the path the agent took** (step sequence + signature hash, LLM/tool/retrieve/retry counts) |
+| `quality_scores` | Per-trace LLM-as-judge verdict: **how GOOD the output was** (5 dimensions + overall) |
+| `request_routing` | Per REASON span: **WHERE inference ran** (maps each LLM call to its serving `node_id`/`gpu_id`) |
+| `gpu_metrics` | GPU time series keyed by `node_id` + `timestamp_ms`: utilization, contention, temp, throttle |
+| `network_metrics` | Network time series keyed by `node_id` + `timestamp_ms`: latency, packet drops, retransmits |
+| `trace_correlated` | The unified fact table: **quality joined to the infra conditions that produced it**, one wide row per trace |
+
+### How the Tables Join
+
+```
+agent_steps ──(group by trace_id)──▶ trajectory_templates   # what the agent DID
+agent_steps ──(LLM-as-judge)───────▶ quality_scores         # how GOOD the output was
+agent_steps ──(REASON span → node)─▶ request_routing        # WHERE inference ran
+gpu_metrics / network_metrics        (time series, keyed by node_id + timestamp_ms)
+
+trace_correlated = trajectory ⋈ quality        ON trace_id
+                             ⋈ routing          ON trace_id  → gives node_id
+                             ⋈ gpu/net metrics  ON node_id AND |metric.ts − trace.ts| ≤ ±10s
+```
+
+### How Quality Is Scored and Correlated
+
+**Scoring (`stream_quality`, Stream 3).** For each impacted trace it reads all `agent_steps` rows, reconstructs the trace context by span kind — `ENTRY` → user request, `REASON` → reasoning chain + final response, `RETRIEVE`/`TOOL` → evidence — and sends one prompt to the **judge LLM** (`EVAL_MODEL=qwen2.5:7b` on Vast.ai). The judge returns strict JSON scoring 5 dimensions (1–5):
+
+| Dimension | Meaning |
 |-----------|---------|
-| `src/telemetry.py` | OpenTelemetry setup — TracerProvider, MeterProvider, LoggerProvider with OTLP + Pulsar exporters |
-| `src/metrics.py` | Custom OTel metrics: LLM latency/tokens, agent handoffs, RAG retrieval, tool calls, retries, workflow duration |
-| `src/llm_client.py` | Ollama LLM client with retry logic (tenacity) and per-call span instrumentation |
-| `src/rag.py` | RAG retrieval via ChromaDB + sentence-transformers embeddings, traced |
-| `src/tools.py` | Builtin travel tools, HTTP tool client, MCP tool client — all traced |
-| `src/agents.py` | Multi-agent system: Orchestrator, Research, Flight, Hotel, Itinerary agents |
-| `src/chat_server.py` | FastAPI chat server with session persistence (SQLite), intent extraction, multi-turn conversation |
-| `src/mcp_server.py` | FastAPI MCP tool server exposing simulated travel APIs (flights, hotels, weather, visa, currency) |
-| `src/session_store.py` | SQLite-backed session/conversation persistence |
-| `src/pulsar_exporter.py` | Custom OpenTelemetry SpanExporter that writes spans to Apache Pulsar |
-| `src/trace_consumer.py` | Pulsar consumer that reads OTLP spans and writes to Delta Lake (`trace_delta_table`) |
-| `src/streaming_config.py` | Shared config, schemas, Spark session factory, span classification logic for all streaming jobs |
-| `src/stream_agent_steps.py` | Stream 1: raw spans → classified `agent_steps` (Delta MERGE) |
-| `src/stream_trajectory.py` | Stream 2: agent_steps → `trajectory_templates` (trajectory signature extraction) |
-| `src/stream_quality.py` | Stream 3: agent_steps → `quality_scores` (LLM-as-judge evaluation via Ollama) |
-| `src/stream_routing_infra.py` | Stream 4: agent_steps → `gpu_metrics`, `network_metrics`, `request_routing` (simulated infra) |
-| `src/stream_correlated.py` | Stream 5: quality_scores → `trace_correlated` (joins trajectory + quality + infra metrics) |
-| `src/infra_simulator.py` | GPU contention, network latency, and topology-aware request routing simulator |
-| `src/analytics_api.py` | FastAPI analytics server — reads all Delta tables, serves REST API + dashboard UI |
-| `src/main.py` | CLI entrypoint with interactive chat session |
+| `completeness` | Addresses all parts of the request |
+| `coherence` | Logically structured and consistent |
+| `hallucination` | Fabricated claims not in evidence (5 = none, 1 = severe) |
+| `groundedness` | Grounded in tool/retrieval results |
+| `relevance` | Stays on-topic |
 
-## Telemetry Signals Emitted
+`overall` is the mean of the five. Rows MERGE into `quality_scores` keyed on `(trace_id, session_id)`; a failed eval lands as all-zeros with an `explanation` error string.
 
-### Traces (Spans)
+**Correlation (`stream_correlated`, Stream 5).** Driven by `trajectory_templates`, it left-joins each trace's quality scores, then time-aligns infra signals: for every routing hop it pulls GPU and network samples within a **±10s window** of the hop timestamp and aggregates them (avg/max contention, temperature, memory pressure, throttle count, inter-node latency, packet drops, TCP retransmits, queue wait). The result is a single wide row per trace carrying the **quality dimensions side-by-side with the infra conditions that produced them** — so a low `quality_overall` or high `hallucination` can be read directly against `gpu_contention_max`, `gpu_throttle_count`, or `inter_node_latency_max` on the same record. Missing quality (eval lag) defaults to `0.0` rather than dropping the trace.
 
-| Span Name | Description |
-|-----------|-------------|
-| `agent.orchestrator.plan_trip` | Root span for the entire multi-agent workflow |
-| `agent.research_agent.research_destination` | RAG retrieval + LLM reasoning |
-| `agent.flight_agent.search_flights` | Tool calls + LLM analysis for flights |
-| `agent.hotel_agent.search_hotels` | Hotel search + weather check |
-| `agent.itinerary_agent.create_itinerary` | Final day-by-day synthesis |
-| `chat {model}` | Each Ollama inference call (model, tokens, latency) |
-| `findNearest {collection}` | ChromaDB vector retrieval (query, doc count) |
-| `builtin/{tool_name}` | Builtin tool invocations (search_flights, search_hotels, get_weather, get_visa_info, currency_convert) |
-| `HTTP {METHOD}` | External HTTP calls with OTel semantic conventions |
-| `travel-tools/{tool_name}` | MCP tool server invocations |
+### Deploy Steps (end to end)
 
-All spans carry `session.id` (injected by a custom `SessionIdSpanProcessor`) and standard OTel resource attributes (`service.name`, `service.version`, `deployment.environment`).
+**Prerequisites (Mac):** Docker running, Java (for Spark), Python venv, this repo.
+**Prerequisites (Vast.ai):** GPU instance reachable via SSH key.
 
-### Metrics
+```bash
+# 1. Open the dual SSH tunnel (keep this terminal open)
+ssh -i ~/.ssh/innovation -p <VAST_SSH_PORT> root@<VAST_IP> -N \
+  -L 11435:localhost:11434 \
+  -R 8000:localhost:8000
 
-| Metric | Type | Description |
-|--------|------|-------------|
-| `llm.call.duration` | Histogram | LLM inference latency (seconds) |
-| `llm.token.usage` | Counter | Tokens consumed per call |
-| `llm.calls.total` | Counter | Total LLM calls |
-| `llm.errors.total` | Counter | LLM errors by type |
-| `agent.handoffs.total` | Counter | Agent-to-agent handoffs |
-| `agent.active` | UpDownCounter | Currently active agents |
-| `rag.retrieval.duration` | Histogram | Vector search latency |
-| `rag.documents.retrieved` | Histogram | Docs returned per query |
-| `tool.calls.total` | Counter | Tool invocations |
-| `tool.call.duration` | Histogram | Tool call latency |
-| `tool.errors.total` | Counter | Tool call errors |
-| `retry.attempts.total` | Counter | Retry count by operation |
-| `workflow.duration` | Histogram | End-to-end workflow time |
-| `workflow.requests.total` | Counter | Total workflow requests |
+# 2. In a SEPARATE terminal: SSH into the Vast.ai box (interactive shell)
+ssh -i ~/.ssh/innovation -p <VAST_SSH_PORT> root@<VAST_IP>
 
-### Logs
+#    Then ON the Vast.ai box: clone repo + start Ollama + collectors
+git clone https://github.com/agamjain14/Trajectory-Analytics-Workflow.git /workspace/trajectory 2>/dev/null
+cd /workspace/trajectory
+ROLE=collector NODE_ID=node-1 \
+  INGEST_URL=http://localhost:8000 \
+  EVAL_MODEL=qwen2.5:7b \
+  bash deploy/vastai_setup.sh
 
-Structured JSON logs via OpenTelemetry LoggerProvider + `structlog`, automatically correlated with trace/span context.
+# 3. On Mac: start the full local pipeline (inference + judge → Vast)
+OLLAMA_NODES=http://localhost:11435 \
+  EVAL_MODEL=qwen2.5:7b \
+  bash deploy/hybrid_local.sh start
 
-## Setup Instructions
+# 4. Verify
+bash deploy/hybrid_local.sh status
+curl http://localhost:8000/ingest/status   # last_real_gpu_ago_s / last_real_net_ago_s = real pushes
 
-### Live Demo (Azure VM)
+# 5. Generate traffic, then query analytics (~30-60s lag from 30s triggers)
+curl -X POST http://localhost:8000/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Plan a trip to Tokyo for 5 days"}'
+curl http://localhost:8000/analytics/correlation/traces
 
-The system is deployed and running on Azure. Access it directly:
+# 6. Stop
+bash deploy/hybrid_local.sh stop
+```
+
+**Does the single script start everything local?** Yes. `deploy/hybrid_local.sh start` is the only command needed on the Mac — it boots Docker infra (Pulsar/OTel/Jaeger/Prometheus/Grafana), initializes all Delta tables, then launches the MCP server, chat app, `trace_consumer`, and all 5 Spark streaming jobs (detached, logs in `/tmp/trajectory-hybrid/`). `stop` tears all of it down.
+
+**Where does the Vast.ai connection happen?** Two places, both over the SSH tunnel from Step 1 — the script never SSHes itself:
+- **Inference + judge (Mac → Vast):** `OLLAMA_NODES=http://localhost:11435` and `EVAL_MODEL` point the app and quality job at `localhost:11435`, which the `-L 11435:localhost:11434` forward tunnels to Vast Ollama.
+- **Metrics (Vast → Mac):** the remote collectors `POST` to `localhost:8000`, which the `-R 8000:localhost:8000` reverse tunnels back to the Mac's chat app.
 
 | Service | URL |
 |---------|-----|
-| Chat UI | http://20.98.203.5:8000/static/index.html |
-| Analytics | http://20.98.203.5:8000/static/analytics.html |
-| Topology | http://20.98.203.5:8000/static/topology.html |
-| API Docs | http://20.98.203.5:8000/docs |
-| Jaeger | http://20.98.203.5:16686 |
-| Grafana | http://20.98.203.5:3000 (admin/admin) |
-| Prometheus | http://20.98.203.5:9090 |
-| Status | http://20.98.203.5:8000/ingest/status |
+| Chat UI | http://localhost:8000/static/index.html |
+| Analytics | http://localhost:8000/static/analytics.html |
+| Status | http://localhost:8000/ingest/status |
+| Logs | `/tmp/trajectory-hybrid/` |
+
+
+## Setup Instructions
 
 ---
 

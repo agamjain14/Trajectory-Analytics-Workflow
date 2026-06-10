@@ -13,6 +13,7 @@ Python 3.11+ · Ollama · OpenTelemetry · Pulsar · PySpark Structured Streamin
 - Config via `os.getenv()` with defaults. No hardcoded URLs/paths/models.
 - Module-level constants in `UPPER_SNAKE_CASE`.
 - Self-documenting names over comments.
+- Keep explanations short and concise, to the point without losing any information. Make it crisp and informative.
 
 ## OTel
 

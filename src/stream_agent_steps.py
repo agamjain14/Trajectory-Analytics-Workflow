@@ -91,6 +91,7 @@ def process_batch(spark: SparkSession, micro_batch_df: DataFrame, batch_id: int)
             "collection": None, "query_text": None, "returned_rows": None,
             "rpc_method": None, "url": None, "status_code": None,
             "context": None, "prompt": None, "response": None,
+            "node_id": None,
             "ingestion_date": ingestion_date,
             "ingestion_hour": ingestion_hour,
         }

@@ -40,6 +40,16 @@ def ingest_gpu_metrics(spark: SparkSession):
         if raw_df.isEmpty():
             return 0
 
+        # Collectors emit only raw metrics; derive the partition columns
+        # (ingestion_date / ingestion_hour) from timestamp_ms in UTC so the
+        # Delta table partitions correctly instead of __HIVE_DEFAULT_PARTITION__.
+        ts = F.timestamp_millis(F.col("timestamp_ms"))
+        raw_df = (
+            raw_df
+            .withColumn("ingestion_date", F.date_format(ts, "yyyy-MM-dd"))
+            .withColumn("ingestion_hour", F.hour(ts))
+        )
+
         target = DeltaTable.forPath(spark, GPU_METRICS_PATH)
         (
             target.alias("target")
@@ -66,6 +76,15 @@ def ingest_network_metrics(spark: SparkSession):
         raw_df = spark.read.schema(NETWORK_METRICS_SCHEMA).json(raw_path)
         if raw_df.isEmpty():
             return 0
+
+        # Derive partition columns from timestamp_ms in UTC (collectors no
+        # longer send ingestion_date / ingestion_hour).
+        ts = F.timestamp_millis(F.col("timestamp_ms"))
+        raw_df = (
+            raw_df
+            .withColumn("ingestion_date", F.date_format(ts, "yyyy-MM-dd"))
+            .withColumn("ingestion_hour", F.hour(ts))
+        )
 
         target = DeltaTable.forPath(spark, NETWORK_METRICS_PATH)
         (
@@ -112,13 +131,12 @@ def process_routing(spark: SparkSession, micro_batch_df: DataFrame, batch_id: in
     routing_rows = []
 
     for span in reason_spans:
-        # Determine which node handled this span from span attributes
-        # In real deployment, this comes from the load balancer response header.
-        # Here we use the node_id embedded in the span context by the LLM client.
-        span_context = span.context or ""
-        if NODE_2_ID in span_context:
-            node_id = NODE_2_ID
-        else:
+        # Ground truth: the LLM client stamps the serving node onto the REASON
+        # span (app.inference.node_id), which stream_agent_steps persists into
+        # agent_steps.node_id. We read it directly instead of guessing.
+        node_id = getattr(span, "node_id", None)
+        if not node_id:
+            # Fallback for spans collected before node stamping existed.
             node_id = NODE_1_ID
 
         # Find GPU info from latest GPU metrics for this node
@@ -141,12 +159,9 @@ def process_routing(spark: SparkSession, micro_batch_df: DataFrame, batch_id: in
         except Exception:
             pass
 
-        # Queue wait: difference between span start and actual inference start
-        # Approximated as a fraction of total duration for now
+        # Queue wait is not measured by the Ollama client today, so we do NOT
+        # fabricate it. Leave 0.0 until a real queue-wait signal is available.
         queue_wait_ms = 0.0
-        if span.duration_ms and span.duration_ms > 100:
-            # First 5-15% is typically queue wait on a loaded GPU
-            queue_wait_ms = round(span.duration_ms * 0.05, 2)
 
         routing_rows.append({
             "trace_id": span.trace_id,
@@ -200,7 +215,11 @@ def main():
     ensure_delta_table(spark, NETWORK_METRICS_PATH, NETWORK_METRICS_SCHEMA)
     ensure_delta_table(spark, ROUTING_PATH, ROUTING_SCHEMA)
 
-    stream_df = spark.readStream.format("delta").load(AGENT_STEPS_PATH)
+    stream_df = (
+        spark.readStream.format("delta")
+        .option("skipChangeCommits", "true")
+        .load(AGENT_STEPS_PATH)
+    )
 
     query = (
         stream_df.writeStream

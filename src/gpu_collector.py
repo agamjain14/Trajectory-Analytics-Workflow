@@ -20,6 +20,8 @@ except ImportError:
     print("ERROR: pynvml not installed. Run: pip install pynvml", file=sys.stderr)
     sys.exit(1)
 
+from src.contention import compute_contention_index
+
 NODE_ID = os.getenv("NODE_ID", socket.gethostname())
 COLLECT_INTERVAL = int(os.getenv("COLLECT_INTERVAL", "5"))
 OUTPUT_FILE = os.getenv("GPU_METRICS_OUTPUT", "./data/gpu_metrics_raw/metrics.jsonl")
@@ -84,16 +86,11 @@ def collect_gpu_metrics(handles):
             pcie_tx_mbps = round(pcie_tx / 1000.0, 2)  # KB/s → MB/s
             pcie_rx_mbps = round(pcie_rx / 1000.0, 2)
 
-            # Contention index: weighted composite
-            contention_index = round(
-                0.20 * (gpu_utilization / 100.0)
-                + 0.15 * (memory_controller_util / 100.0)
-                + 0.15 * (memory_used_pct / 100.0)
-                + 0.15 * min(temperature_c / 90.0, 1.0)
-                + 0.15 * (power_draw_pct / 100.0)
-                + 0.10 * float(throttle_active)
-                + 0.10 * min((pcie_tx_mbps + pcie_rx_mbps) / 15000.0, 1.0),
-                4,
+            # Contention index: canonical weighted composite (shared formula)
+            contention_index = compute_contention_index(
+                gpu_utilization, memory_controller_util, memory_used_pct,
+                temperature_c, power_draw_pct, throttle_active,
+                pcie_tx_mbps, pcie_rx_mbps,
             )
 
             rows.append({

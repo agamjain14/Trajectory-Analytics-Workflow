@@ -60,18 +60,22 @@ class LLMClient:
             else:
                 node_urls = [self.base_url]
 
+            # Each entry carries a stable node_id (node-1, node-2, ...).
+            # This is the GROUND TRUTH of which node we dispatch a request to
+            # — the round-robin selection is our own deterministic choice, not a guess.
             self._ollama_clients = [
-                {"url": url, "client": ollama_lib.Client(host=url)} for url in node_urls
+                {"url": url, "client": ollama_lib.Client(host=url), "node_id": f"node-{i + 1}"}
+                for i, url in enumerate(node_urls)
             ]
             self.client = self._ollama_clients[0]["client"]
 
     def _next_ollama_client(self):
-        """Round-robin select the next Ollama client."""
+        """Round-robin select the next Ollama client. Returns (client, url, node_id)."""
         if not self._ollama_clients:
-            return self.client, self.base_url
+            return self.client, self.base_url, "node-1"
         node = self._ollama_clients[self._node_index % len(self._ollama_clients)]
         self._node_index += 1
-        return node["client"], node["url"]
+        return node["client"], node["url"], node["node_id"]
 
     def _before_retry(self, retry_state):
         """Log retry attempts and record metrics."""
@@ -114,15 +118,17 @@ class LLMClient:
                 "eval_count": tokens,
                 "prompt_eval_count": input_tokens,
                 "_node_url": self.base_url,
+                "_node_id": "azure",
             }
         else:
-            client, node_url = self._next_ollama_client()
+            client, node_url, node_id = self._next_ollama_client()
             response = client.chat(
                 model=use_model,
                 messages=messages,
                 options={"temperature": temperature, "num_predict": 512, "num_ctx": 2048},
             )
             response["_node_url"] = node_url
+            response["_node_id"] = node_id
             return response
 
     def chat(
@@ -163,6 +169,9 @@ class LLMClient:
 
                 span.set_attribute("gen_ai.response.model", use_model)
                 span.set_attribute("gen_ai.response.node_url", response.get("_node_url", self.base_url))
+                # Custom (non-semconv) attribute: the node we dispatched this
+                # inference to. Ground truth for trace→node attribution downstream.
+                span.set_attribute("app.inference.node_id", response.get("_node_id", "node-1"))
                 span.set_attribute("gen_ai.usage.output_tokens", tokens)
                 span.set_attribute("gen_ai.usage.input_tokens", response.get("prompt_eval_count", len(str(messages)) // 4))
                 span.set_attribute("gen_ai.response.content_length", len(content))

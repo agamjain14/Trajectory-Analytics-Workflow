@@ -16,6 +16,7 @@ import math
 import os
 import random
 import time
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -24,6 +25,8 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 import pyarrow as pa
 from deltalake import DeltaTable, write_deltalake
+
+from src.contention import compute_contention_index
 
 logger = logging.getLogger("live_metrics")
 
@@ -34,6 +37,19 @@ NET_METRICS_PATH = os.path.join(DATA_DIR, "network_metrics")
 ROUTING_PATH = os.path.join(DATA_DIR, "request_routing")
 CORRELATED_PATH = os.path.join(DATA_DIR, "trace_correlated")
 AGENT_STEPS_PATH = os.path.join(DATA_DIR, "agent_steps")
+
+# Raw landing zones that the Spark routing job ingests (must match
+# stream_routing_infra.GPU_METRICS_RAW / NET_METRICS_RAW).
+GPU_METRICS_RAW = os.getenv("GPU_METRICS_RAW", os.path.join(DATA_DIR, "gpu_metrics_raw"))
+NET_METRICS_RAW = os.getenv("NET_METRICS_RAW", os.path.join(DATA_DIR, "net_metrics_raw"))
+
+# METRICS_MODE controls who owns the metrics Delta tables and correlation:
+#   "real"      → Spark owns the pipeline. Ingested rows land as raw JSONL for
+#                the Spark routing job; the no-Spark synthetic + correlation
+#                loops are disabled (prevents dual-write collisions).
+#   "synthetic" → No-Spark local fallback. live_metrics writes Delta directly
+#                and runs its own correlation (turnkey demo without a GPU).
+METRICS_MODE = os.getenv("METRICS_MODE", "synthetic").lower()
 
 SYNTHETIC_INTERVAL = int(os.getenv("SYNTHETIC_INTERVAL", "5"))  # seconds
 CORRELATION_INTERVAL = int(os.getenv("CORRELATION_INTERVAL", "30"))  # seconds
@@ -138,6 +154,35 @@ def _append_net(rows: list[dict]):
     write_deltalake(NET_METRICS_PATH, table, mode="append")
 
 
+def _append_raw_jsonl(dir_path: str, rows: list[dict]):
+    """Append rows as JSON lines into a raw landing zone for the Spark job.
+
+    In real mode, the Spark routing job owns the Delta MERGE — live_metrics only
+    drops raw rows here so there is a single writer per Delta table.
+    """
+    Path(dir_path).mkdir(parents=True, exist_ok=True)
+    fname = os.path.join(dir_path, f"ingest-{int(time.time() * 1000)}-{os.getpid()}.jsonl")
+    with open(fname, "a", encoding="utf-8") as fh:
+        for r in rows:
+            fh.write(json.dumps(r) + "\n")
+
+
+def _ingest_gpu_rows(rows: list[dict]):
+    """Route ingested GPU rows: raw JSONL in real mode, Delta in synthetic mode."""
+    if METRICS_MODE == "real":
+        _append_raw_jsonl(GPU_METRICS_RAW, rows)
+    else:
+        _append_gpu(rows)
+
+
+def _ingest_net_rows(rows: list[dict]):
+    """Route ingested network rows: raw JSONL in real mode, Delta in synthetic mode."""
+    if METRICS_MODE == "real":
+        _append_raw_jsonl(NET_METRICS_RAW, rows)
+    else:
+        _append_net(rows)
+
+
 # --- Ingest endpoints (Vast.ai pushes here) ---
 
 @router.post("/ingest/gpu_metrics")
@@ -145,7 +190,7 @@ async def ingest_gpu(row: GPUMetricRow):
     """Receive GPU metrics from remote collector (Vast.ai node)."""
     global _last_real_gpu_ts
     _last_real_gpu_ts = time.time()
-    _append_gpu([row.model_dump()])
+    _ingest_gpu_rows([row.model_dump()])
     return {"status": "ok"}
 
 
@@ -154,7 +199,7 @@ async def ingest_network(row: NetworkMetricRow):
     """Receive network metrics from remote collector (Vast.ai node)."""
     global _last_real_net_ts
     _last_real_net_ts = time.time()
-    _append_net([row.model_dump()])
+    _ingest_net_rows([row.model_dump()])
     return {"status": "ok"}
 
 
@@ -163,7 +208,7 @@ async def ingest_gpu_batch(rows: list[GPUMetricRow]):
     """Batch receive GPU metrics."""
     global _last_real_gpu_ts
     _last_real_gpu_ts = time.time()
-    _append_gpu([r.model_dump() for r in rows])
+    _ingest_gpu_rows([r.model_dump() for r in rows])
     return {"status": "ok", "count": len(rows)}
 
 
@@ -172,7 +217,7 @@ async def ingest_network_batch(rows: list[NetworkMetricRow]):
     """Batch receive network metrics."""
     global _last_real_net_ts
     _last_real_net_ts = time.time()
-    _append_net([r.model_dump() for r in rows])
+    _ingest_net_rows([r.model_dump() for r in rows])
     return {"status": "ok", "count": len(rows)}
 
 
@@ -210,7 +255,9 @@ def _generate_synthetic_gpu(node_id: str, t: float) -> dict:
     pcie_tx = max(0, min(16000, gpu_util * 80 + random.gauss(0, 500)))
     pcie_rx = max(0, min(16000, gpu_util * 60 + random.gauss(0, 400)))
     ecc = random.randint(0, 1) if random.random() < 0.02 else 0
-    contention = (gpu_util * 0.3 + mem_ctrl * 0.25 + mem_used * 0.2 + (temp / 100) * 0.15 + power * 0.1) / 100.0
+    contention = compute_contention_index(
+        gpu_util, mem_ctrl, mem_used, temp, power, throttle, pcie_tx, pcie_rx
+    )
 
     return {
         "timestamp_ms": int(time.time() * 1000),
@@ -253,6 +300,9 @@ def _generate_synthetic_net(node_id: str, peer_id: str, t: float) -> dict:
 
 async def synthetic_metrics_loop():
     """Background loop: generates synthetic metrics when no real data is flowing."""
+    if METRICS_MODE == "real":
+        logger.info("Synthetic metrics fallback disabled (METRICS_MODE=real)")
+        return
     t = 0.0
     logger.info("Synthetic metrics fallback started")
     while True:
@@ -285,6 +335,9 @@ async def synthetic_metrics_loop():
 
 async def correlation_loop():
     """Background loop: correlates recent traces with latest metrics every 30s."""
+    if METRICS_MODE == "real":
+        logger.info("Live correlation disabled (METRICS_MODE=real, Spark owns correlation)")
+        return
     logger.info("Correlation loop started")
     while True:
         await asyncio.sleep(CORRELATION_INTERVAL)
@@ -323,17 +376,29 @@ def _run_correlation():
     if not new_ids:
         return
 
-    # Get GPU metrics summary
+    # Load recent GPU metrics (per-row, for time-window matching against traces)
     gpu_dt = DeltaTable(GPU_METRICS_PATH)
     gpu_table = gpu_dt.to_pyarrow_table()
-    recent_gpu = [
+    gpu_rows = [
         {col: gpu_table.column(col)[i].as_py() for col in gpu_table.column_names}
-        for i in range(max(0, gpu_table.num_rows - 100), gpu_table.num_rows)
+        for i in range(max(0, gpu_table.num_rows - 500), gpu_table.num_rows)
     ]
 
-    avg_contention = sum(r["contention_index"] for r in recent_gpu) / max(len(recent_gpu), 1) if recent_gpu else 0
-    avg_temp = sum(r["temperature_c"] for r in recent_gpu) / max(len(recent_gpu), 1) if recent_gpu else 0
-    max_temp = max((r["temperature_c"] for r in recent_gpu), default=0)
+    # Load recent network metrics (same window-matching strategy)
+    net_rows = []
+    if DeltaTable.is_deltatable(NET_METRICS_PATH):
+        net_table = DeltaTable(NET_METRICS_PATH).to_pyarrow_table()
+        net_rows = [
+            {col: net_table.column(col)[i].as_py() for col in net_table.column_names}
+            for i in range(max(0, net_table.num_rows - 500), net_table.num_rows)
+        ]
+
+    # Metrics sample every ~5s; widen the trace window so short traces still
+    # overlap at least one sample on each node.
+    WINDOW_MS = 15000
+
+    def _avg(vals):
+        return sum(vals) / len(vals) if vals else 0.0
 
     # Build correlated rows for new traces
     correlated_rows = []
@@ -355,6 +420,35 @@ def _run_correlation():
         llm_calls = sum(1 for s in trace_steps if s.get("span_kind") == "REASON")
         tool_calls = sum(1 for s in trace_steps if s.get("span_kind") == "TOOL")
         retrieve_calls = sum(1 for s in trace_steps if s.get("span_kind") == "RETRIEVE")
+
+        # --- Time-window correlation: only metrics overlapping this trace ---
+        w_start, w_end = start_ts - WINDOW_MS, end_ts + WINDOW_MS
+        gpu_in = [r for r in gpu_rows if w_start <= (r.get("timestamp_ms") or 0) <= w_end]
+        if not gpu_in:
+            gpu_in = gpu_rows[-2:]  # fallback: most recent sample(s)
+
+        # Group GPU samples by node; the busiest node (highest mean contention)
+        # is the one that actually served this trace's inference.
+        gpu_by_node = defaultdict(list)
+        for r in gpu_in:
+            gpu_by_node[r.get("node_id") or "node-1"].append(r)
+        primary_node = max(
+            gpu_by_node,
+            key=lambda n: _avg([x.get("contention_index", 0.0) for x in gpu_by_node[n]]),
+        ) if gpu_by_node else "node-1"
+        pnode_gpu = gpu_by_node.get(primary_node, gpu_in)
+
+        # Network samples for the primary node within the same window
+        net_in = [
+            r for r in net_rows
+            if r.get("node_id") == primary_node and w_start <= (r.get("timestamp_ms") or 0) <= w_end
+        ]
+        if not net_in:
+            net_in = [r for r in net_rows if r.get("node_id") == primary_node][-2:]
+
+        contention_vals = [r.get("contention_index", 0.0) for r in pnode_gpu]
+        temp_vals = [r.get("temperature_c", 0.0) for r in pnode_gpu]
+        latency_vals = [r.get("inter_node_latency_us", 0.0) for r in net_in if (r.get("inter_node_latency_us") or 0) > 0]
 
         ingestion_time = datetime.now(timezone.utc)
 
@@ -378,22 +472,22 @@ def _run_correlation():
             "quality_groundedness": 0.0,
             "quality_relevance": 0.0,
             "quality_explanation": "",
-            "gpu_contention_avg": round(avg_contention, 4),
-            "gpu_contention_max": round(avg_contention, 4),
-            "gpu_temperature_avg": round(avg_temp, 1),
-            "gpu_temperature_max": round(max_temp, 1),
-            "gpu_memory_pressure_avg": 0.0,
-            "gpu_throttle_count": sum(1 for r in recent_gpu if r.get("throttle_active", 0)),
-            "gpu_power_avg": sum(r.get("power_draw_pct", 0) for r in recent_gpu) / max(len(recent_gpu), 1),
-            "inter_node_latency_avg": 0.0,
-            "inter_node_latency_max": 0.0,
-            "packet_drop_total": 0,
-            "tcp_retransmit_total": 0,
+            "gpu_contention_avg": round(_avg(contention_vals), 4),
+            "gpu_contention_max": round(max(contention_vals, default=0.0), 4),
+            "gpu_temperature_avg": round(_avg(temp_vals), 1),
+            "gpu_temperature_max": round(max(temp_vals, default=0.0), 1),
+            "gpu_memory_pressure_avg": round(_avg([r.get("memory_used_pct", 0.0) for r in pnode_gpu]), 1),
+            "gpu_throttle_count": sum(1 for r in pnode_gpu if r.get("throttle_active", 0)),
+            "gpu_power_avg": round(_avg([r.get("power_draw_pct", 0.0) for r in pnode_gpu]), 1),
+            "inter_node_latency_avg": round(_avg(latency_vals), 1),
+            "inter_node_latency_max": round(max(latency_vals, default=0.0), 1),
+            "packet_drop_total": sum(r.get("packet_drop_count", 0) or 0 for r in net_in),
+            "tcp_retransmit_total": sum(r.get("tcp_retransmit_count", 0) or 0 for r in net_in),
             "queue_wait_avg": 0.0,
             "queue_wait_max": 0.0,
-            "primary_pod_id": "",
-            "primary_node_id": trace_steps[0].get("node_id", "local"),
-            "primary_gpu_id": "",
+            "primary_pod_id": f"ollama-{primary_node}",
+            "primary_node_id": primary_node,
+            "primary_gpu_id": (pnode_gpu[0].get("gpu_id") if pnode_gpu else "") or "gpu-0",
             "ingestion_date": ingestion_time.strftime("%Y-%m-%d"),
             "ingestion_hour": ingestion_time.hour,
         })

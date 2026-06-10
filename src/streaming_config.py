@@ -108,6 +108,7 @@ AGENT_STEPS_SCHEMA = StructType([
     StructField("context", StringType(), True),
     StructField("prompt", StringType(), True),
     StructField("response", StringType(), True),
+    StructField("node_id", StringType(), True),
     StructField("ingestion_date", StringType(), False),
     StructField("ingestion_hour", IntegerType(), False),
 ])
@@ -209,6 +210,7 @@ def create_spark_session(app_name: str) -> SparkSession:
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
         .config("spark.databricks.delta.schema.autoMerge.enabled", "true")
         .config("spark.sql.streaming.schemaInference", "true")
+        .config("spark.sql.session.timeZone", "UTC")
         .config("spark.submit.deployMode", "client")
         .master("local[*]")
     )
@@ -287,6 +289,8 @@ def flatten_tags(span_kind: str, tags: dict) -> dict:
         flat["context"] = tags.get("gen_ai.prompt.system")
         flat["prompt"] = tags.get("gen_ai.prompt.user")
         flat["response"] = tags.get("gen_ai.response.content")
+        # Ground-truth serving node stamped by the LLM client at dispatch time.
+        flat["node_id"] = tags.get("app.inference.node_id")
     elif span_kind == "RETRIEVE":
         flat["collection"] = tags.get("db.collection.name")
         flat["query_text"] = tags.get("db.query.text")

@@ -1,7 +1,7 @@
 # Trajectory Analytics Workflow - Makefile
 # One-command operations for local and cloud deployment.
 
-.PHONY: help local up down logs cloud-deploy cloud-destroy collect stream test clean
+.PHONY: help local up down logs cloud-deploy cloud-destroy collect stream test clean dev-hybrid
 
 # Default target
 help:
@@ -14,6 +14,12 @@ help:
 	@echo "    make down           - Stop all local services"
 	@echo "    make logs           - Tail application logs"
 	@echo "    make test           - Run load test against local"
+	@echo ""
+	@echo "  HYBRID (local pipeline, inference on Vast.ai):"
+	@echo "    make dev-hybrid VAST=http://<vastai-ip>:11434"
+	@echo "                        - Spark + Delta + analytics + chat run LOCAL;"
+	@echo "                          only inference is routed to Vast.ai; GPU/net"
+	@echo "                          collectors run on Vast.ai and push to this host."
 	@echo ""
 	@echo "  CLOUD (Azure deployment):"
 	@echo "    make cloud-deploy   - Deploy to Azure Container Apps"
@@ -46,6 +52,25 @@ local: up
 	@echo "    Wait ~60s for model download, then visit:"
 	@echo "    http://localhost:8000/static/index.html"
 	@echo ""
+
+# ============================================================
+# HYBRID - Local pipeline, inference routed to Vast.ai
+# ============================================================
+# Everything (Spark, Delta, analytics, chat, metrics ingestion) runs LOCAL and
+# is queryable. Only LLM inference is dispatched to one or more Vast.ai Ollama
+# nodes. GPU/network collectors run ON Vast.ai and push to this host's
+# /ingest/* endpoints (set INGEST_URL on the Vast.ai box to this host).
+#
+# Usage:
+#   make dev-hybrid VAST=http://<vastai-ip>:11434
+#   make dev-hybrid VAST="http://ip1:11434,http://ip2:11434"   # multi-node
+
+dev-hybrid:
+	@test -n "$(VAST)" || (echo "ERROR: Set VAST=http://<vastai-ip>:11434 (Ollama URL[s], comma-separated for multi-node)" && exit 1)
+	@echo "==> Hybrid mode: local pipeline + inference on $(VAST)"
+	@echo "    On the Vast.ai node(s), run collectors with:"
+	@echo "      INGEST_URL=http://<this-host>:8000 bash deploy/vastai_setup.sh collector"
+	OLLAMA_NODES="$(VAST)" METRICS_MODE=real bash run_local.sh
 
 up:
 	docker compose -f docker-compose.local.yml up -d --build
