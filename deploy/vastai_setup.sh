@@ -15,7 +15,7 @@ set -euo pipefail
 ROLE="${ROLE:-collector}"
 NODE_ID="${NODE_ID:?Set NODE_ID (e.g. node-1)}"
 PEER_IP="${PEER_IP:-}"
-GITHUB_REPO="${GITHUB_REPO:-https://github.com/YOUR_USER/Trajectory-Analytics-Workflow.git}"
+GITHUB_REPO="${GITHUB_REPO:-https://github.com/agamjain14/Trajectory-Analytics-Workflow.git}"
 
 echo "==> Setting up $ROLE node: $NODE_ID"
 
@@ -99,8 +99,8 @@ if [ "$ROLE" = "primary" ]; then
   # Start streaming jobs (Spark local[*])
   echo "==> Starting Spark streaming jobs (local master)..."
   export DATA_PATH=./data
-  # Judge uses stronger model on Node 2
-  export EVAL_MODEL=qwen2.5:7b
+  # Judge uses stronger model on Node 2 (override EVAL_MODEL for smaller VRAM)
+  export EVAL_MODEL="${EVAL_MODEL:-qwen2.5:7b}"
   export OLLAMA_BASE_URL="http://${NODE_2_IP}:11434"
   export JUDGE_BACKEND=ollama
 
@@ -127,8 +127,9 @@ else
 
   pip install pynvml psutil requests
 
-  # Pull judge model (stronger eval on Node 2)
-  ollama pull qwen2.5:7b
+  # Pull judge model (stronger eval on Node 2; override EVAL_MODEL for smaller VRAM)
+  EVAL_MODEL="${EVAL_MODEL:-qwen2.5:7b}"
+  ollama pull "$EVAL_MODEL"
 
   echo "==> Starting collectors (pushing to $INGEST_URL)..."
   INGEST_URL="$INGEST_URL" NODE_ID="$NODE_ID" PEER_IP="$PEER_IP" \
