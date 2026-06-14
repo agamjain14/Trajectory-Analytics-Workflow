@@ -415,8 +415,17 @@ def get_trajectory_mutations(
     for r in rows:
         groups[r.get("trajectory_signature") or "unknown"].append(r)
 
-    # Dominant path = most frequent signature (healthy structural reference).
-    dominant_sig = max(groups, key=lambda s: len(groups[s]))
+    # Dominant path = most frequent signature among GOOD-quality traces — the
+    # healthy structural reference. Raw most-frequent is fragile: under heavy
+    # degradation a truncated/aborted stub (e.g. ENTRY-only) can become the most
+    # common path and would falsely be labeled the healthy baseline. Restrict to
+    # paths whose majority of traces are good, falling back to overall if none.
+    good_groups = {
+        s: g for s, g in groups.items()
+        if sum(1 for r in g if (r.get("quality_overall") or 0) >= bad_threshold) > len(g) / 2
+    }
+    ref_groups = good_groups or groups
+    dominant_sig = max(ref_groups, key=lambda s: len(ref_groups[s]))
     dom = groups[dominant_sig]
     dom_steps = _avg([r.get("step_count") for r in dom])
     dom_llm = _avg([r.get("llm_call_count") for r in dom])
