@@ -229,21 +229,59 @@ def get_network_metrics(
 
 @app.get("/analytics/topology")
 def get_topology():
-    """Get infrastructure topology."""
+    """Get infrastructure topology.
+
+    Falls back to synthesizing the topology from the live ``gpu_metrics`` table
+    when no dedicated topology table has been written (e.g. the hybrid local
+    deployment where the only infra source is the real Vast.ai GPU collector).
+    """
     rows = _load_table("topology")
-    if not rows:
+    if rows:
+        # Group by entity type
+        by_type = defaultdict(list)
+        for r in rows:
+            r["properties"] = json.loads(r["properties"]) if r.get("properties") else {}
+            by_type[r["entity_type"]].append(r)
+
+        return {
+            "entities": rows,
+            "by_type": dict(by_type),
+            "summary": {t: len(items) for t, items in by_type.items()},
+        }
+
+    # --- Fallback: derive topology from real GPU metrics ---
+    gpu_rows = _load_table("gpu_metrics")
+    if not gpu_rows:
         raise HTTPException(404, "topology table not found")
 
-    # Group by entity type
-    by_type = defaultdict(list)
-    for r in rows:
-        r["properties"] = json.loads(r["properties"]) if r.get("properties") else {}
-        by_type[r["entity_type"]].append(r)
+    nodes: dict[str, dict] = {}
+    gpus: dict[str, dict] = {}
+    for r in gpu_rows:
+        node_id = r.get("node_id") or "node-1"
+        gpu_id = r.get("gpu_id") or "gpu-0"
+        gpu_key = f"{node_id}:{gpu_id}"
+        if node_id not in nodes:
+            nodes[node_id] = {
+                "entity_type": "node",
+                "entity_id": node_id,
+                "parent_id": None,
+                "properties": {"source": "gpu_collector", "nic": "real", "switch_port": "vast.ai"},
+            }
+        if gpu_key not in gpus:
+            gpus[gpu_key] = {
+                "entity_type": "gpu",
+                "entity_id": gpu_key,
+                "parent_id": node_id,
+                "properties": {"gpu_uuid": r.get("gpu_uuid", "")},
+            }
 
+    entities = list(nodes.values()) + list(gpus.values())
+    by_type = {"node": list(nodes.values()), "gpu": list(gpus.values())}
     return {
-        "entities": rows,
-        "by_type": dict(by_type),
+        "entities": entities,
+        "by_type": by_type,
         "summary": {t: len(items) for t, items in by_type.items()},
+        "synthesized_from": "gpu_metrics",
     }
 
 
