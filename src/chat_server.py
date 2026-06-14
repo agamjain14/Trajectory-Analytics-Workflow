@@ -200,6 +200,7 @@ from src.analytics_api import (
     get_quality_detail, get_gpu_metrics, get_network_metrics,
     get_topology, get_correlated_traces, get_analytics_windows,
     get_correlation_alerts, get_microstructure, get_routing, get_llm_summary,
+    get_trajectory_mutations,
 )
 app.get("/analytics/trajectories")(get_trajectories)
 app.get("/analytics/trajectories/{trace_id}")(get_trajectory_detail)
@@ -213,6 +214,7 @@ app.get("/analytics/correlation/windows")(get_analytics_windows)
 app.get("/analytics/correlation/alerts")(get_correlation_alerts)
 app.get("/analytics/microstructure")(get_microstructure)
 app.get("/analytics/routing")(get_routing)
+app.get("/analytics/mutations")(get_trajectory_mutations)
 app.get("/analytics/summary")(get_llm_summary)
 
 # Mount live metrics ingest endpoints (Vast.ai collectors push here)

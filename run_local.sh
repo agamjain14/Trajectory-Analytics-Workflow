@@ -131,9 +131,9 @@ python3 -c "
 from src.streaming_config import (
     create_spark_session, ensure_delta_table,
     SOURCE_PATH, AGENT_STEPS_PATH, TRAJECTORY_PATH, QUALITY_PATH,
-    GPU_METRICS_PATH, NETWORK_METRICS_PATH, ROUTING_PATH, CORRELATED_PATH,
+    GPU_METRICS_PATH, NETWORK_METRICS_PATH, ROUTING_PATH, CORRELATED_PATH, ANALYTICS_WINDOWS_PATH,
     SOURCE_SCHEMA, AGENT_STEPS_SCHEMA, TRAJECTORY_SCHEMA, QUALITY_SCHEMA,
-    GPU_METRICS_SCHEMA, NETWORK_METRICS_SCHEMA, ROUTING_SCHEMA, CORRELATED_SCHEMA,
+    GPU_METRICS_SCHEMA, NETWORK_METRICS_SCHEMA, ROUTING_SCHEMA, CORRELATED_SCHEMA, ANALYTICS_WINDOWS_SCHEMA,
 )
 spark = create_spark_session('TableInit')
 ensure_delta_table(spark, SOURCE_PATH, SOURCE_SCHEMA)
@@ -144,13 +144,14 @@ ensure_delta_table(spark, GPU_METRICS_PATH, GPU_METRICS_SCHEMA)
 ensure_delta_table(spark, NETWORK_METRICS_PATH, NETWORK_METRICS_SCHEMA)
 ensure_delta_table(spark, ROUTING_PATH, ROUTING_SCHEMA)
 ensure_delta_table(spark, CORRELATED_PATH, CORRELATED_SCHEMA)
+ensure_delta_table(spark, ANALYTICS_WINDOWS_PATH, ANALYTICS_WINDOWS_SCHEMA)
 spark.stop()
-print('  ✓ All 8 Delta tables initialized')
+print('  ✓ All 9 Delta tables initialized')
 "
 
 # ── [7/7] Spark Streaming jobs ──
 echo ""
-echo "[7/7] Starting 5 Spark streaming jobs..."
+echo "[7/7] Starting 6 Spark streaming jobs..."
 python3 -m src.stream_agent_steps &
 PIDS+=($!)
 python3 -m src.stream_trajectory &
@@ -160,6 +161,8 @@ PIDS+=($!)
 python3 -m src.stream_routing_infra &
 PIDS+=($!)
 python3 -m src.stream_correlated &
+PIDS+=($!)
+python3 -m src.stream_windows &
 PIDS+=($!)
 sleep 5
 echo "  ✓ All streaming jobs launched"

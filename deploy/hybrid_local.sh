@@ -33,6 +33,8 @@ PROC_PATTERNS=(
   "src.stream_quality"
   "src.stream_routing_infra"
   "src.stream_correlated"
+  "src.stream_windows"
+  "src.synthetic_collector"
 )
 
 stop_all() {
@@ -136,9 +138,9 @@ python3 -c "
 from src.streaming_config import (
     create_spark_session, ensure_delta_table,
     SOURCE_PATH, AGENT_STEPS_PATH, TRAJECTORY_PATH, QUALITY_PATH,
-    GPU_METRICS_PATH, NETWORK_METRICS_PATH, ROUTING_PATH, CORRELATED_PATH,
+    GPU_METRICS_PATH, NETWORK_METRICS_PATH, ROUTING_PATH, CORRELATED_PATH, ANALYTICS_WINDOWS_PATH,
     SOURCE_SCHEMA, AGENT_STEPS_SCHEMA, TRAJECTORY_SCHEMA, QUALITY_SCHEMA,
-    GPU_METRICS_SCHEMA, NETWORK_METRICS_SCHEMA, ROUTING_SCHEMA, CORRELATED_SCHEMA,
+    GPU_METRICS_SCHEMA, NETWORK_METRICS_SCHEMA, ROUTING_SCHEMA, CORRELATED_SCHEMA, ANALYTICS_WINDOWS_SCHEMA,
 )
 spark = create_spark_session('TableInit')
 for p, s in [
@@ -146,6 +148,7 @@ for p, s in [
     (TRAJECTORY_PATH, TRAJECTORY_SCHEMA), (QUALITY_PATH, QUALITY_SCHEMA),
     (GPU_METRICS_PATH, GPU_METRICS_SCHEMA), (NETWORK_METRICS_PATH, NETWORK_METRICS_SCHEMA),
     (ROUTING_PATH, ROUTING_SCHEMA), (CORRELATED_PATH, CORRELATED_SCHEMA),
+    (ANALYTICS_WINDOWS_PATH, ANALYTICS_WINDOWS_SCHEMA),
 ]:
     ensure_delta_table(spark, p, s)
 spark.stop()
@@ -163,10 +166,21 @@ nohup python3 -m uvicorn src.chat_server:app --host 0.0.0.0 --port 8000 \
 sleep 3
 
 # Spark streaming jobs (detached)
-echo "[4/4] Starting 5 Spark streaming jobs..."
-for job in stream_agent_steps stream_trajectory stream_quality stream_routing_infra stream_correlated; do
+echo "[4/4] Starting 6 Spark streaming jobs..."
+for job in stream_agent_steps stream_trajectory stream_quality stream_routing_infra stream_correlated stream_windows; do
   nohup python3 -m "src.$job" > "$LOG_DIR/$job.log" 2>&1 & record $!
 done
+
+# Optional synthetic GPU/network fallback. METRICS_MODE=real means the in-process
+# live_metrics synthetic loop is OFF and the only GPU source is the real Vast.ai
+# collector. When no real GPU is available, set SYNTHETIC_GPU=1 to push VARYING
+# synthetic contention into the raw landing zone the Spark routing job ingests —
+# giving the correlation a contention axis with real spread.
+if [ "${SYNTHETIC_GPU:-0}" = "1" ]; then
+  echo "  + synthetic GPU/network pusher (SYNTHETIC_GPU=1, no real GPU)"
+  nohup python3 -m src.synthetic_collector --stream --interval 5 \
+    > "$LOG_DIR/synthetic_gpu.log" 2>&1 & record $!
+fi
 
 echo ""
 echo "============================================"

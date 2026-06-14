@@ -33,6 +33,7 @@ GPU_METRICS_PATH = os.path.join(BASE_DATA_PATH, "gpu_metrics")
 NETWORK_METRICS_PATH = os.path.join(BASE_DATA_PATH, "network_metrics")
 ROUTING_PATH = os.path.join(BASE_DATA_PATH, "request_routing")
 CORRELATED_PATH = os.path.join(BASE_DATA_PATH, "trace_correlated")
+ANALYTICS_WINDOWS_PATH = os.path.join(BASE_DATA_PATH, "analytics_windows")
 CHECKPOINT_BASE = os.path.join(BASE_DATA_PATH, "checkpoints")
 
 # --- Streaming config ---
@@ -198,6 +199,41 @@ CORRELATED_SCHEMA = StructType([
     StructField("primary_pod_id", StringType()), StructField("primary_node_id", StringType()),
     StructField("primary_gpu_id", StringType()),
     StructField("ingestion_date", StringType()), StructField("ingestion_hour", IntegerType()),
+])
+
+# Windowed analytics: time-bucketed trajectory drift + cross-layer correlation
+# verdicts. Produced by stream_windows from trace_correlated. Overwritten each
+# trigger (small derived table — no partitioning).
+ANALYTICS_WINDOWS_SCHEMA = StructType([
+    StructField("window_size", StringType()),
+    StructField("window_start_ms", LongType()),
+    StructField("window_end_ms", LongType()),
+    StructField("trace_count", IntegerType()),
+    # Q1: trajectory distribution + drift over time
+    StructField("dominant_signature", StringType()),
+    StructField("dominant_share", DoubleType()),
+    StructField("unique_signatures", IntegerType()),
+    StructField("trajectory_entropy", DoubleType()),
+    StructField("trajectory_drift_jsd", DoubleType()),
+    StructField("is_baseline", IntegerType()),
+    # Quality aggregates + baseline comparison
+    StructField("quality_overall_avg", DoubleType()),
+    StructField("quality_hallucination_avg", DoubleType()),
+    StructField("quality_overall_baseline", DoubleType()),
+    StructField("quality_delta", DoubleType()),
+    # Infra aggregates
+    StructField("gpu_contention_avg", DoubleType()),
+    StructField("gpu_contention_max", DoubleType()),
+    StructField("net_latency_avg", DoubleType()),
+    StructField("packet_drop_total", IntegerType()),
+    # Q2: the three "lights" + correlation + verdict
+    StructField("quality_drop", IntegerType()),
+    StructField("trajectory_drift", IntegerType()),
+    StructField("gpu_pressure", IntegerType()),
+    StructField("network_pressure", IntegerType()),
+    StructField("contention_quality_corr", DoubleType()),
+    StructField("correlation_flag", StringType()),
+    StructField("correlation_details", StringType()),
 ])
 
 

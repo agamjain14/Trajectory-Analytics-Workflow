@@ -349,6 +349,81 @@ def get_routing():
     }
 
 
+@app.get("/analytics/mutations")
+def get_trajectory_mutations(
+    bad_threshold: float = Query(3.0, description="quality_overall below this = bad outcome"),
+):
+    """Q3: Which trajectory mutations lead to incorrect/partial outcomes?
+
+    Groups correlated traces by trajectory_signature (the execution path), then
+    for each path computes its bad-outcome rate, its lift over the global bad
+    rate, and its structural delta vs the dominant (most common) path. Paths
+    with lift > 1 are harmful mutations; shorter step/LLM counts or higher
+    retry counts explain WHY (truncated reasoning / fallback churn).
+    """
+    rows = _load_table("trace_correlated")
+    if not rows:
+        raise HTTPException(404, "trace_correlated table not found")
+
+    def _avg(vals):
+        vals = [v for v in vals if v is not None]
+        return sum(vals) / len(vals) if vals else 0.0
+
+    total = len(rows)
+    global_bad = sum(1 for r in rows if (r.get("quality_overall") or 0) < bad_threshold)
+    global_bad_rate = global_bad / max(total, 1)
+
+    groups = defaultdict(list)
+    for r in rows:
+        groups[r.get("trajectory_signature") or "unknown"].append(r)
+
+    # Dominant path = most frequent signature (healthy structural reference).
+    dominant_sig = max(groups, key=lambda s: len(groups[s]))
+    dom = groups[dominant_sig]
+    dom_steps = _avg([r.get("step_count") for r in dom])
+    dom_llm = _avg([r.get("llm_call_count") for r in dom])
+
+    mutations = []
+    for sig, grp in groups.items():
+        n = len(grp)
+        bad = sum(1 for r in grp if (r.get("quality_overall") or 0) < bad_threshold)
+        bad_rate = bad / max(n, 1)
+        lift = round(bad_rate / global_bad_rate, 3) if global_bad_rate > 0 else 0.0
+        avg_steps = _avg([r.get("step_count") for r in grp])
+        avg_llm = _avg([r.get("llm_call_count") for r in grp])
+        mutations.append({
+            "signature": sig,
+            "is_dominant": sig == dominant_sig,
+            "count": n,
+            "share": round(n / total, 4),
+            "bad_rate": round(bad_rate, 4),
+            "lift": lift,
+            "avg_quality": round(_avg([r.get("quality_overall") for r in grp]), 3),
+            "avg_hallucination": round(_avg([r.get("quality_hallucination") for r in grp]), 3),
+            "avg_step_count": round(avg_steps, 2),
+            "avg_llm_calls": round(avg_llm, 2),
+            "avg_tool_calls": round(_avg([r.get("tool_call_count") for r in grp]), 2),
+            "avg_retry_count": round(_avg([r.get("retry_count") for r in grp]), 2),
+            "avg_gpu_contention": round(_avg([r.get("gpu_contention_avg") for r in grp]), 4),
+            "step_delta_vs_dominant": round(avg_steps - dom_steps, 2),
+            "llm_delta_vs_dominant": round(avg_llm - dom_llm, 2),
+            "step_sequence": grp[0].get("step_sequence", ""),
+        })
+
+    # Rank harmful paths first: highest bad rate, then most frequent.
+    mutations.sort(key=lambda m: (-m["bad_rate"], -m["count"]))
+    harmful = [m for m in mutations if m["lift"] > 1.0]
+
+    return {
+        "total_traces": total,
+        "bad_threshold": bad_threshold,
+        "global_bad_rate": round(global_bad_rate, 4),
+        "dominant_signature": dominant_sig,
+        "harmful_count": len(harmful),
+        "mutations": mutations,
+    }
+
+
 @app.get("/analytics/summary")
 def get_llm_summary():
     """Generate LLM-powered natural language summary of current analytics state."""

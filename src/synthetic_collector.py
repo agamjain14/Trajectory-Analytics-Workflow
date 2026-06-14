@@ -85,15 +85,73 @@ def generate_network_metrics(node_id: str, peer_id: str, timestamp_ms: int, t: f
     }
 
 
+def run_stream(output_dir: str, interval: int, seed: int):
+    """Continuous real-time synthetic fallback.
+
+    Appends one GPU + one network sample per node every `interval` seconds to
+    the raw JSONL landing zone the Spark routing job ingests
+    (gpu_metrics_raw/, net_metrics_raw/), timestamped at NOW. Contention
+    oscillates and periodically bursts above the pressure threshold, so the
+    contention axis has real spread for correlation — exactly what an idle real
+    GPU cannot provide. Idempotent: Spark merges by (timestamp_ms, node, gpu).
+    """
+    random.seed(seed)
+    gpu_dir = Path(output_dir) / "gpu_metrics_raw"
+    net_dir = Path(output_dir) / "net_metrics_raw"
+    gpu_dir.mkdir(parents=True, exist_ok=True)
+    net_dir.mkdir(parents=True, exist_ok=True)
+
+    nodes = ["node-1", "node-2"]
+    print(
+        f"[synthetic-gpu] streaming every {interval}s -> {gpu_dir}/ + {net_dir}/ "
+        f"(contention oscillation + bursts; Ctrl+C to stop)"
+    )
+
+    t = 0.0
+    burst_until = -1.0
+    next_burst = random.uniform(30, 90)
+    try:
+        while True:
+            now_ms = int(time.time() * 1000)
+            if t >= next_burst and t > burst_until:
+                burst_until = t + random.uniform(20, 60)
+                next_burst = burst_until + random.uniform(60, 150)
+            contention = t <= burst_until
+
+            for node in nodes:
+                peer = [n for n in nodes if n != node][0]
+                gpu_row = generate_gpu_metrics(node, now_ms, t, contention)
+                with open(gpu_dir / f"synthetic-{node}.jsonl", "a") as gf:
+                    gf.write(json.dumps(gpu_row) + "\n")
+                net_row = generate_network_metrics(node, peer, now_ms, t, contention)
+                with open(net_dir / f"synthetic-{node}.jsonl", "a") as nf:
+                    nf.write(json.dumps(net_row) + "\n")
+
+            t += interval
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print("\n[synthetic-gpu] stopped")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate synthetic GPU/network JSONL for local mode")
     parser.add_argument("--duration", type=int, default=300, help="Duration in seconds of simulated data")
     parser.add_argument("--interval", type=int, default=5, help="Seconds between samples")
     parser.add_argument("--output-dir", default="./data", help="Base output directory")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument(
+        "--stream", action="store_true",
+        help="Continuous real-time fallback: append samples with timestamp=now "
+             "to the raw landing zone the Spark routing job ingests. Use when no "
+             "real GPU collector is available (METRICS_MODE=real / hybrid).",
+    )
     args = parser.parse_args()
 
     random.seed(args.seed)
+
+    if args.stream:
+        run_stream(args.output_dir, args.interval, args.seed)
+        return
 
     gpu_dir = Path(args.output_dir) / "gpu_metrics_raw"
     net_dir = Path(args.output_dir) / "net_metrics_raw"

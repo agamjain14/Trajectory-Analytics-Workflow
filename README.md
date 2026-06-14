@@ -259,6 +259,13 @@ trace_correlated = trajectory ⋈ quality        ON trace_id
                              ⋈ gpu/net metrics  ON node_id AND |metric.ts − trace.ts| ≤ ±10s
 ```
 
+Condition: a metric row attaches to a trace only if it shares the same node and its timestamp falls inside the trace's execution window. That's the whole point — it ties a quality drop to the specific GPU/network conditions that existed while that trace was running, not to a global average.
+
+Semantic meaning
+Each trace_correlated row answers: "This trajectory (e.g. ENTRY→PLAN→AGENT→RETRIEVE→REASON) scored X on quality, and while it executed, its serving GPU was Y% contended at Z°C with W µs inter-node latency." That lets you say things like "hallucination spikes correlate with GPU throttling on node-2," which is the project's core thesis.
+
+
+
 ### How Quality Is Scored and Correlated
 
 **Scoring (`stream_quality`, Stream 3).** For each impacted trace it reads all `agent_steps` rows, reconstructs the trace context by span kind — `ENTRY` → user request, `REASON` → reasoning chain + final response, `RETRIEVE`/`TOOL` → evidence — and sends one prompt to the **judge LLM** (`EVAL_MODEL=qwen2.5:7b` on Vast.ai). The judge returns strict JSON scoring 5 dimensions (1–5):
